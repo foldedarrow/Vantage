@@ -13,10 +13,13 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from unittest import mock
+
 from ctfauto.config import classify_target, Profile, RunConfig
 from ctfauto.modules import exploit as E
 from ctfauto.modules import recon as R
 from ctfauto.modules import enumerate as EN
+from ctfauto.modules import cloud as CL
 from ctfauto import wordlists as W
 
 
@@ -218,6 +221,107 @@ class TestWordlists(unittest.TestCase):
         payloads = E._lfi_payloads(cfg)
         self.assertLessEqual(len(payloads), 60)
         self.assertGreater(len(payloads), len(E._LFI_PAYLOADS))
+
+
+class TestCloud(unittest.TestCase):
+    """Cloud recon: name generation, the 4 S3 states, Azure listing, and gating.
+    All HTTP/CLI is mocked — the suite makes NO live cloud calls."""
+
+    def _cfg(self, **kw):
+        base = dict(target="", profile=Profile.lab(), out_dir="/tmp",
+                    discovered_tools={}, cloud=True, allow_cloud=True,
+                    cloud_name="acme", cloud_providers=("aws",))
+        base.update(kw)
+        return RunConfig(**base)
+
+    # --- name generation ---
+    def test_keyword_seed(self):
+        names = CL.generate_candidates("acme", cap=50)
+        self.assertIn("acme", names)
+        self.assertIn("acme-backups", names)
+
+    def test_domain_seed_derives_roots(self):
+        self.assertEqual(CL._seed_roots("flaws.cloud"), ["flaws", "flaws-cloud", "flawscloud"])
+
+    def test_extra_words_included(self):
+        names = CL.generate_candidates("acme", extra_words=["redteam"], cap=200)
+        self.assertTrue(any("redteam" in n for n in names))
+
+    def test_candidate_cap_respected(self):
+        self.assertLessEqual(len(CL.generate_candidates("acme", cap=10)), 10)
+
+    def test_harvest_s3_names_from_enum(self):
+        enum = EN.EnumResult()
+        enum.add(EN.EnumFinding(80, "x", "found", "see https://secret-bucket.s3.amazonaws.com/k"))
+        self.assertIn("secret-bucket", CL.names_from_enum(enum))
+
+    # --- S3 states (HTTP path, awscli absent) ---
+    def _probe_with_http(self, status, body, cfg=None):
+        res = CL.CloudResult()
+        with mock.patch.object(CL, "_http", return_value=(status, body)):
+            CL._s3_probe(cfg or self._cfg(), "acme", res)
+        return res.findings
+
+    def test_s3_listable(self):
+        f = self._probe_with_http(200, "<ListBucketResult><Contents/></ListBucketResult>")
+        self.assertTrue(any(x.state == "listable" for x in f))
+
+    def test_s3_private_but_exists(self):
+        f = self._probe_with_http(403, "AccessDenied")
+        self.assertTrue(any(x.state == "exists" for x in f))
+
+    def test_s3_missing_no_finding(self):
+        f = self._probe_with_http(404, "NoSuchBucket")
+        self.assertEqual(f, [])
+
+    def test_s3_write_only_when_aggressive(self):
+        # default (non-aggressive): listable response, but NO write attempted
+        res = CL.CloudResult()
+        cfg = self._cfg(aggressive=False)
+        with mock.patch.object(CL, "_http", return_value=(200, "<ListBucketResult/>")) as h:
+            CL._s3_probe(cfg, "acme", res)
+        # only GET calls, never a PUT
+        methods = [c.kwargs.get("method", c.args[1] if len(c.args) > 1 else "GET")
+                   for c in h.call_args_list]
+        self.assertNotIn("PUT", methods)
+        self.assertFalse(any(x.state == "writable" for x in res.findings))
+
+    def test_s3_write_attempted_when_aggressive(self):
+        res = CL.CloudResult()
+        cfg = self._cfg(aggressive=True)
+        def fake_http(url, method="GET", **kw):
+            if method == "PUT":
+                return 200, ""
+            return 200, "<ListBucketResult/>"
+        with mock.patch.object(CL, "_http", side_effect=fake_http):
+            CL._s3_probe(cfg, "acme", res)
+        self.assertTrue(any(x.state == "writable" for x in res.findings))
+
+    # --- Azure ---
+    def test_azure_container_listable(self):
+        res = CL.CloudResult()
+        def fake_http(url, **kw):
+            if "comp=list" in url and "restype=container" in url:
+                return 200, "<EnumerationResults><Blobs/></EnumerationResults>"
+            return 200, ""  # account exists
+        with mock.patch.object(CL, "_http", side_effect=fake_http):
+            CL._azure_probe(self._cfg(cloud_providers=("azure",)), "acmedata", res)
+        self.assertTrue(any(x.state == "listable" and x.provider == "azure"
+                            for x in res.findings))
+
+    def test_azure_account_missing(self):
+        res = CL.CloudResult()
+        with mock.patch.object(CL, "_http", return_value=(0, "")):
+            CL._azure_probe(self._cfg(), "nope", res)
+        self.assertEqual(res.findings, [])
+
+    # --- bridge into report structures ---
+    def test_findings_bridge_to_enum(self):
+        res = CL.CloudResult()
+        res.add(CL.CloudFinding("aws", "acme", "listable", "x", severity="high"))
+        ef = res.as_enum_findings()
+        self.assertEqual(ef[0].tags["cloud"], "aws")
+        self.assertEqual(ef[0].tags["cloud_state"], "listable")
 
 
 if __name__ == "__main__":

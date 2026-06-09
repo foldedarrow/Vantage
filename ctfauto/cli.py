@@ -40,6 +40,10 @@ _INSTALL_HINTS = {
     "mysql": "apt install default-mysql-client",
     "showmount": "apt install nfs-common",
     "arjun": "pipx install arjun",
+    # cloud recon (all optional — module has a stdlib HTTP fallback)
+    "aws": "apt install awscli   # or: pipx install awscli",
+    "s3scanner": "pipx install s3scanner",
+    "cloud_enum": "pipx install cloud_enum",
 }
 
 
@@ -89,6 +93,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true",
                    help="Skip the authorization prompt (lab/HTB only; external still "
                         "requires --allow-external)")
+    # --- cloud recon (unauthenticated public-misconfiguration discovery) ------
+    cloud = p.add_argument_group("cloud recon (unauthenticated misconfig discovery)")
+    cloud.add_argument("--cloud", action="store_true",
+                       help="Run cloud recon: enumerate PUBLIC/exposed S3 buckets & Azure "
+                            "blob containers for a target (read-only by default)")
+    cloud.add_argument("--allow-cloud", action="store_true",
+                       help="Authorize cloud enumeration — you assert you have permission "
+                            "to test the named target. Required for --cloud.")
+    cloud.add_argument("--cloud-name", default="",
+                       help="Seed for name generation: a keyword (acme) or a domain "
+                            "(acme.com). Defaults to the positional target.")
+    cloud.add_argument("--cloud-providers", default="aws",
+                       help="Comma-separated providers to probe: aws,azure (default: aws)")
+    cloud.add_argument("--cloud-extra-words", default="",
+                       help="Comma-separated extra permutation words (e.g. teamname,project)")
+    cloud.add_argument("--cloud-cap", type=int, default=200,
+                       help="Max candidate names to probe per provider (default 200)")
     p.add_argument("--version", action="version", version=f"ctfauto {__version__}")
     return p
 
@@ -119,6 +140,15 @@ def run_doctor(args=None) -> int:
         warn(f"{len(missing)} tool(s) missing; their steps will be skipped.")
     else:
         good("all known tools present.")
+
+    # --- cloud recon tooling (all optional; stdlib HTTP fallback exists) ---
+    cloud_tools = ("aws", "s3scanner", "cloud_enum")
+    have_cloud = [t for t in cloud_tools if tools.get(t)]
+    if have_cloud:
+        good(f"cloud recon helpers present: {', '.join(have_cloud)}")
+    else:
+        info("cloud recon: no helper tools (aws/s3scanner/cloud_enum) — the built-in "
+             "anonymous HTTP probing still works. `apt install awscli` improves S3 results.")
 
     # --- SecLists / wordlist resolution ---
     from . import wordlists
@@ -225,6 +255,50 @@ def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -
     return ans.strip().lower() in ("y", "yes")
 
 
+def _looks_scannable(target: str, cloud_name: str) -> bool:
+    """Heuristic: is `target` something we should run the host pipeline against?
+    A real IP or a dotted hostname is scannable. A bare keyword (e.g. 'acme'),
+    used purely as a cloud seed, is not — that's cloud-only mode."""
+    if not target:
+        return False
+    try:
+        ipaddress.ip_address(target)
+        return True
+    except ValueError:
+        pass
+    # dotted name with a TLD-ish tail -> treat as a host worth scanning
+    return "." in target
+
+
+def cloud_authorization_gate(cfg: RunConfig, assume_yes: bool) -> bool:
+    """Separate gate for cloud recon. Cloud targets are public provider infra, so
+    enumeration requires an explicit --allow-cloud assertion of authorization."""
+    banner("CLOUD AUTHORIZATION CHECK")
+    seed = cfg.cloud_name or cfg.target
+    print(f"Cloud seed:   {C.BOLD}{seed}{C.RESET}")
+    print(f"Providers:    {', '.join(cfg.cloud_providers)}")
+    print(f"Write-test:   {'ENABLED (--aggressive)' if cfg.aggressive else 'disabled (read-only)'}")
+    warn("Cloud recon enumerates PUBLIC cloud resources (S3/Azure) associated with "
+         "the seed. Only do this against assets you own or are authorized to test.")
+    if not cfg.allow_cloud:
+        err("Refusing to run cloud recon without --allow-cloud. Re-run with "
+            "--allow-cloud ONLY if you have explicit authorization to enumerate "
+            "the named target's cloud assets.")
+        return False
+    if cfg.aggressive:
+        warn("--aggressive: the WRITE test is enabled. It writes ONE marker object "
+             "to any world-writable bucket found and tells you to delete it.")
+    if assume_yes:
+        info("--yes supplied; proceeding with cloud recon.")
+        return True
+    try:
+        ans = input(f"\n{C.YELLOW}Confirm you are authorized to enumerate cloud assets "
+                    f"for '{seed}' [y/N]: {C.RESET}")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans.strip().lower() in ("y", "yes")
+
+
 # --- phase orchestration -----------------------------------------------------
 def build_config(args) -> RunConfig:
     klass, target = _resolve_and_classify(args.target)
@@ -266,6 +340,12 @@ def build_config(args) -> RunConfig:
         seclists_dir=args.seclists_dir,
         klass=klass,
         allow_external=args.allow_external,
+        cloud=args.cloud,
+        allow_cloud=args.allow_cloud,
+        cloud_name=args.cloud_name,
+        cloud_providers=tuple(p.strip().lower() for p in args.cloud_providers.split(",") if p.strip()),
+        cloud_extra_words=args.cloud_extra_words,
+        cloud_candidate_cap=args.cloud_cap,
     )
 
     if args.aggressive and klass == "htb":
@@ -300,6 +380,27 @@ def main(argv=None) -> int:
     event(cfg, "run_start", target=cfg.target, klass=cfg.klass,
           profile=cfg.profile.name, auto_exploit=cfg.auto_exploit,
           aggressive=cfg.aggressive, identify_only=cfg.identify_only)
+
+    # Cloud-only mode: --cloud without a need to host-scan. If the seed is a bare
+    # keyword (not a scannable host), we skip the host pipeline entirely and just
+    # run cloud recon behind its own authorization gate.
+    cloud_only = cfg.cloud and not _looks_scannable(cfg.target, cfg.cloud_name)
+    if cloud_only:
+        if not cloud_authorization_gate(cfg, args.yes):
+            err("Cloud authorization not confirmed. Aborting.")
+            event(cfg, "run_abort", reason="cloud_authorization_not_confirmed")
+            return 1
+        from .modules import cloud as cloud_mod
+        banner("CLOUD RECON")
+        cloud_res = cloud_mod.run_cloud_recon(cfg, enum=None)
+        host = recon.HostResult(ip=cfg.target)
+        enum_res = enum_mod.EnumResult()
+        enum_res.findings.extend(cloud_res.as_enum_findings())
+        banner("REPORT")
+        md, js = report.write_reports(cfg, host, enum_res, exploit.ExploitResult())
+        event(cfg, "run_done", report=md, cloud_findings=len(cloud_res.findings))
+        good(f"Done. Open {md} for the readable report.")
+        return 0
 
     if not authorization_gate(cfg, args.yes, args.allow_external):
         err("Authorization not confirmed. Aborting.")
@@ -340,6 +441,17 @@ def main(argv=None) -> int:
 
     banner("PHASE 5 — POST-EXPLOITATION")
     postex_res = postexploit.run_postexploit(cfg, host, exp_res)
+
+    # Optional cloud recon alongside the host run. Harvests bucket names from the
+    # web-enum crawl, then probes them (+ seed permutations) behind its own gate.
+    if cfg.cloud:
+        from .modules import cloud as cloud_mod
+        if cloud_authorization_gate(cfg, args.yes):
+            banner("CLOUD RECON")
+            cloud_res = cloud_mod.run_cloud_recon(cfg, enum=enum_res)
+            enum_res.findings.extend(cloud_res.as_enum_findings())
+        else:
+            warn("cloud recon skipped: authorization not confirmed.")
 
     banner("PHASE 6 — REPORT")
     md, js = report.write_reports(cfg, host, enum_res, exp_res, postex_res)

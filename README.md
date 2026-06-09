@@ -40,6 +40,50 @@ public/unknown IP):
 Run `python run.py --check` (or `ctfauto --check`) any time to see which tools are
 installed and the exact install command for whatever's missing.
 
+## Cloud recon (unauthenticated misconfiguration discovery)
+
+ctfauto can enumerate **publicly-exposed** cloud storage for a target — the cloud
+equivalent of the host recon above. It is scoped to *misconfiguration discovery*:
+it probes only resources the provider has already made reachable to anonymous
+requests, and it never touches private resources, credentials, or IAM.
+
+```bash
+# Enumerate public S3 buckets for a keyword (cloud-only run):
+python run.py acme --cloud --allow-cloud --cloud-name acme
+
+# From a domain, AWS + Azure, alongside a host scan:
+python run.py 10.10.11.42 --cloud --allow-cloud \
+    --cloud-name acme.com --cloud-providers aws,azure
+
+# Add the (gated) write test — writes one marker object to any world-writable
+# bucket and tells you to delete it:
+python run.py acme --cloud --allow-cloud --cloud-name acme --aggressive
+```
+
+What it checks, per candidate name (generated from the seed keyword/domain, plus
+any bucket names harvested from the web-enum crawl):
+
+- **AWS S3** — exists / anonymously **listable** / anonymously **readable** /
+  (under `--aggressive`) anonymously **writable**. Uses `aws s3 --no-sign-request`
+  when the AWS CLI is present, with a built-in anonymous-HTTP fallback otherwise.
+- **Azure Blob** — storage-account existence + anonymous **container listing**.
+
+Safety, same spirit as the rest of the tool:
+
+- **Requires `--allow-cloud`** — an explicit assertion that you're authorized to
+  enumerate the named target's cloud assets. There's a separate authorization gate
+  for it. (Cloud targets are public provider infrastructure, so the scope question
+  is sharper than your lab IPs.)
+- **Read-only by default.** The only write action (the world-writable-bucket test)
+  is gated behind `--aggressive`, writes a single innocuous marker object, logs it
+  loudly, and prints the exact command to delete it.
+- Bounded (candidate cap, default 200) and rate-limited to stay polite.
+- It does **not** do authenticated cloud testing (IAM enumeration, privesc, using a
+  key) — that's a deliberate non-goal of this module.
+
+Optional helpers (`awscli`, `s3scanner`, `cloud_enum`) improve results but aren't
+required — `ctfauto --check` shows what's present.
+
 ## What it does (phases)
 
 1. **Recon** — nmap TCP (`-p-` on lab), plus an optional **UDP top-50 pass**

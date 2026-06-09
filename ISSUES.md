@@ -296,6 +296,30 @@ LFI stage now augments its built-in payloads from the SecLists LFI list (capped 
 
 ---
 
+## S4 — Capability (cloud)
+
+### #32 — Cloud recon: unauthenticated public-misconfiguration discovery ✅ ADDED
+**What:** ctfauto was host-only (IP + ports). Added a cloud phase
+(`ctfauto/modules/cloud.py`) for the cloud equivalent of recon — finding
+**publicly-exposed** storage a target has left open.
+**Scope (deliberately narrow):** probes only resources reachable to anonymous
+requests; never private resources, IAM, or credentials. AWS S3 (exists / listable /
+readable / writable) and Azure Blob (account + anonymous container listing).
+Candidate names generated from a seed keyword OR domain (`--cloud-name`), plus
+bucket names harvested from the web-enum crawl. Uses `aws --no-sign-request` when
+present, anonymous-HTTP fallback otherwise.
+**Safety:** requires `--allow-cloud` (its own authorization gate, since cloud
+targets are public provider infra). Read-only by default; the world-writable test
+is gated behind `--aggressive`, writes one innocuous marker, and prints the delete
+command. Candidate cap (200) + rate-limited. Findings surface in the report with
+severity, behind a cloud-exposure banner. NOT authenticated cloud testing — that's
+a deliberate non-goal. Covered by `TestCloud` (13 offline, mocked tests).
+**Future (out of scope here):** an authenticated mode (supply a key → enumerate
+access / privesc / loot) would be a separate module with a credential-handling +
+authorization model; not built.
+
+---
+
 ## S5 — Packaging & polish
 
 ### #28 — No tests at all 💡

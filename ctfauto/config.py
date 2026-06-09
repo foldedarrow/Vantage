@@ -143,6 +143,13 @@ class RunConfig:
     allow_external: bool = False     # explicit opt-in to actively touch an external target
     events_path: str = ""            # NDJSON event log path (issue #25); "" = disabled
     seclists_dir: str = ""           # override SecLists root (else auto-detect / $CTFAUTO_SECLISTS)
+    # --- cloud recon (unauthenticated public-misconfig discovery) -------------
+    cloud: bool = False              # run the cloud recon phase
+    allow_cloud: bool = False        # explicit authorization to enumerate cloud targets
+    cloud_name: str = ""             # seed: a keyword (acme) or domain (acme.com)
+    cloud_providers: tuple = ("aws",)  # which providers to probe: aws, azure
+    cloud_extra_words: str = ""      # comma-separated extra permutation words
+    cloud_candidate_cap: int = 200   # max candidate names to probe (politeness bound)
 
 
 def classify_target(target: str) -> str:
@@ -177,6 +184,8 @@ def detect_tools() -> dict:
         # new recon/enum tooling
         "onesixtyone", "snmpwalk", "snmp-check", "sslscan",
         "wpscan", "droopescan", "sqlmap", "mount", "showmount",
-        "mysql", "git-dumper",
+        "mysql", "git-dumper", "feroxbuster", "arjun",
+        # cloud recon (unauthenticated misconfig discovery)
+        "aws", "s3scanner", "cloud_enum",
     ]
     return {t: shutil.which(t) for t in tools}

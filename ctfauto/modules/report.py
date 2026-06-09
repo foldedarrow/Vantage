@@ -64,6 +64,29 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
              "contain credentials or PII. Handle accordingly._")
     L.append("")
 
+    # Cloud misconfiguration findings (if the cloud phase ran) — surfaced up top.
+    cloud_finds = [f for f in enum.findings if f.tags.get("cloud")]
+    if cloud_finds:
+        hot = [f for f in cloud_finds
+               if f.tags.get("cloud_state") in ("listable", "writable", "readable", "takeover")]
+        L.append("## Cloud exposure (unauthenticated)\n")
+        if hot:
+            L.append("> ☁️ **Public cloud misconfigurations found** — these are "
+                     "anonymously accessible:")
+            for f in hot:
+                sev = f.tags.get("severity", "info")
+                L.append(f"> - **{f.tags['cloud'].upper()}** {f.summary}  _[{sev}]_")
+            L.append("")
+        L.append("| Provider | Resource | State | Severity |")
+        L.append("|---|---|---|---|")
+        for f in cloud_finds:
+            prov = f.tags.get("cloud", "?")
+            state = f.tags.get("cloud_state", "?")
+            sev = f.tags.get("severity", "info")
+            res = f.summary.split(":")[0]
+            L.append(f"| {prov} | {res} | {state} | {sev} |")
+        L.append("")
+
     L.append("## Open services\n")
     all_svcs = host.services + getattr(host, "udp_services", [])
     if all_svcs:
