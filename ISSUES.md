@@ -282,15 +282,17 @@ toolchain on Kali, and a `--check`/`--doctor` mode that prints a tool matrix and
 exact install commands for whatever's missing. Wire wordlist/seclists path detection
 here too (#27).
 
-### #27 — Hardcoded wordlist/seclists paths with no detection 🔎
-**Where:** `enumerate._enum_http` (`/usr/share/wordlists/dirb/common.txt`,
-`/usr/share/seclists/...subdomains-top1million-5000.txt`), `_brute_candidates`
-(`rockyou.txt`, `unix_users.txt`).
-**What:** If those exact paths don't exist (non-Kali, or seclists not installed), the
-step warns and skips. The vhost wordlist path in particular is frequently absent.
-**Fix:** Detect common wordlist locations, allow env/config overrides, and ship sane
-fallbacks. Fail loudly with the install hint rather than silently skipping vhost/dir
-discovery.
+### #27 — Hardcoded wordlist/seclists paths with no detection ✅ RESOLVED
+**Where:** `enumerate._enum_http`, `_brute_candidates`, `_run_brute`, `_probe_lfi`.
+**What:** Wordlist paths were hardcoded; the vhost path in particular had no fallback
+and silently skipped when SecLists wasn't at that exact location (and the apt vs
+pip/git capitalisation differs: `/usr/share/seclists` vs `/usr/share/SecLists`).
+**Fixed:** New `ctfauto/wordlists.py` resolves the SecLists root across all common
+install locations + `$CTFAUTO_SECLISTS` + `--seclists-dir`, with named getters
+(directory, files, vhost, LFI, params, usernames, passwords) that try SecLists first
+and fall back to dirb/rockyou/metasploit lists. All consumers route through it; the
+LFI stage now augments its built-in payloads from the SecLists LFI list (capped at
+60). `--check` shows the resolved root + each wordlist. Covered by `TestWordlists`.
 
 ---
 

@@ -17,6 +17,7 @@ from ctfauto.config import classify_target, Profile, RunConfig
 from ctfauto.modules import exploit as E
 from ctfauto.modules import recon as R
 from ctfauto.modules import enumerate as EN
+from ctfauto import wordlists as W
 
 
 class TestClassification(unittest.TestCase):
@@ -147,6 +148,76 @@ class TestSNMP(unittest.TestCase):
 
     def test_no_community(self):
         self.assertEqual(EN._parse_onesixtyone_community("no response"), "")
+
+
+class TestWordlists(unittest.TestCase):
+    """SecLists resolver: root detection, override precedence, fallbacks (#27)."""
+
+    def setUp(self):
+        # Reset the module-level cache and any env between tests.
+        W._seclists_root_cache = None
+        self._old_env = os.environ.pop("CTFAUTO_SECLISTS", None)
+        # Build a minimal fake SecLists tree.
+        self.tmp = tempfile.mkdtemp()
+        for rel in (
+            "Discovery/Web-Content/raft-medium-directories.txt",
+            "Discovery/DNS/subdomains-top1million-5000.txt",
+            "Fuzzing/LFI/LFI-Jhaddix.txt",
+            "Usernames/top-usernames-shortlist.txt",
+            "Passwords/Common-Credentials/10k-most-common.txt",
+        ):
+            p = os.path.join(self.tmp, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").close()
+
+    def tearDown(self):
+        W._seclists_root_cache = None
+        if self._old_env is not None:
+            os.environ["CTFAUTO_SECLISTS"] = self._old_env
+
+    def _cfg(self, seclists_dir=""):
+        return RunConfig(target="", profile=Profile.gentle(), seclists_dir=seclists_dir)
+
+    def test_explicit_override_wins(self):
+        cfg = self._cfg(seclists_dir=self.tmp)
+        self.assertEqual(W.seclists_available(cfg), self.tmp)
+
+    def test_env_var_detected(self):
+        os.environ["CTFAUTO_SECLISTS"] = self.tmp
+        self.assertEqual(W.seclists_available(self._cfg()), self.tmp)
+
+    def test_dir_wordlist_prefers_seclists(self):
+        cfg = self._cfg(seclists_dir=self.tmp)
+        self.assertTrue(W.directory_wordlist(cfg).endswith("raft-medium-directories.txt"))
+
+    def test_vhost_resolves_from_seclists(self):
+        cfg = self._cfg(seclists_dir=self.tmp)
+        self.assertTrue(W.vhost_wordlist(cfg).endswith("subdomains-top1million-5000.txt"))
+
+    def test_user_override_beats_seclists(self):
+        cfg = self._cfg(seclists_dir=self.tmp)
+        f = tempfile.NamedTemporaryFile("w", delete=False); f.close()
+        self.assertEqual(W.directory_wordlist(cfg, override=f.name), f.name)
+
+    def test_bad_override_falls_back(self):
+        cfg = self._cfg(seclists_dir=self.tmp)
+        got = W.directory_wordlist(cfg, override="/nonexistent/list.txt")
+        self.assertTrue(got.endswith("raft-medium-directories.txt"))
+
+    def test_missing_seclists_returns_empty_or_fallback(self):
+        # No SecLists, no system wordlists in the test env => '' for vhost.
+        cfg = self._cfg(seclists_dir="/definitely/not/here")
+        self.assertEqual(W.vhost_wordlist(cfg), "")
+
+    def test_lfi_payloads_merge_capped(self):
+        # Write 200 payloads; _lfi_payloads must cap the merged list at 60.
+        lfi = os.path.join(self.tmp, "Fuzzing/LFI/LFI-Jhaddix.txt")
+        with open(lfi, "w") as f:
+            f.write("\n".join(f"../etc/passwd{i}" for i in range(200)))
+        cfg = self._cfg(seclists_dir=self.tmp)
+        payloads = E._lfi_payloads(cfg)
+        self.assertLessEqual(len(payloads), 60)
+        self.assertGreater(len(payloads), len(E._LFI_PAYLOADS))
 
 
 if __name__ == "__main__":

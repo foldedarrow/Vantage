@@ -70,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wordlist-dirs", default="", help="gobuster/feroxbuster wordlist path")
     p.add_argument("--wordlist-users", default="", help="hydra users wordlist")
     p.add_argument("--wordlist-pass", default="", help="hydra password wordlist")
+    p.add_argument("--seclists-dir", default="",
+                   help="SecLists root (else auto-detect common locations / "
+                        "$CTFAUTO_SECLISTS). e.g. /usr/share/seclists")
     p.add_argument("--post-exploit", action="store_true",
                    help="Stage privesc enumeration (linpeas/winPEAS) over opened sessions")
     p.add_argument("--peas-dir", default="", help="Dir holding linpeas.sh / winPEAS (default /usr/share/peass)")
@@ -91,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # --- doctor / dependency check ----------------------------------------------
-def run_doctor() -> int:
+def run_doctor(args=None) -> int:
     banner(f"ctfauto {__version__} — dependency check")
     tools = detect_tools()
     width = max(len(t) for t in tools)
@@ -116,6 +119,28 @@ def run_doctor() -> int:
         warn(f"{len(missing)} tool(s) missing; their steps will be skipped.")
     else:
         good("all known tools present.")
+
+    # --- SecLists / wordlist resolution ---
+    from . import wordlists
+    from .config import RunConfig, Profile
+    shim = RunConfig(target="", profile=Profile.gentle(),
+                     seclists_dir=(getattr(args, "seclists_dir", "") or ""))
+    print()
+    banner("Wordlists")
+    wl = wordlists.summary(shim)
+    root = wl.pop("seclists_root")
+    if root == "(not found)":
+        warn(f"SecLists not found. Install it (apt install seclists) or point "
+             f"--seclists-dir / $CTFAUTO_SECLISTS at it. Looked in: "
+             f"/usr/share/seclists, /usr/share/SecLists, /opt, ~/.")
+    else:
+        good(f"SecLists root: {root}")
+    wlwidth = max(len(k) for k in wl)
+    for name, path in wl.items():
+        ok = path != "(none)"
+        mark = f"{C.GREEN}✓{C.RESET}" if ok else f"{C.YELLOW}–{C.RESET}"
+        colour = C.GREY if ok else C.YELLOW
+        print(f"  {mark} {name:<{wlwidth}}  {colour}{path}{C.RESET}")
     return 0
 
 
@@ -238,6 +263,7 @@ def build_config(args) -> RunConfig:
         default_creds=not args.no_default_creds,
         post_exploit=args.post_exploit,
         peas_dir=args.peas_dir,
+        seclists_dir=args.seclists_dir,
         klass=klass,
         allow_external=args.allow_external,
     )
@@ -253,7 +279,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.check:
-        return run_doctor()
+        return run_doctor(args)
     if not args.target:
         err("a target is required (or use --check). See --help.")
         return 2

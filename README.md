@@ -101,16 +101,32 @@ python run.py 10.10.11.42 --add-hosts
 # Full lab run with post-exploit privesc enumeration:
 python run.py 192.168.56.101 --auto-exploit --post-exploit --peas-dir ~/peass
 
-# Custom wordlists:
+# Custom wordlists / point at a non-standard SecLists install:
 python run.py 10.0.0.5 --auto-exploit \
     --wordlist-dirs /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt \
-    --wordlist-pass /usr/share/wordlists/rockyou.txt
+    --wordlist-pass /usr/share/wordlists/rockyou.txt \
+    --seclists-dir /opt/SecLists
 ```
+
+### Wordlists & SecLists
+
+ctfauto uses [SecLists](https://github.com/danielmiessler/SecLists) wherever it
+helps — directory/file brute-forcing, vhost discovery, LFI payloads, parameter
+discovery, and credential brute-force all prefer SecLists wordlists and fall back
+to smaller system lists (dirb, rockyou, metasploit) when SecLists isn't present.
+
+It finds SecLists automatically across the common install locations
+(`/usr/share/seclists`, `/usr/share/SecLists`, `/opt`, `~/`). Override with
+`--seclists-dir PATH` or the `CTFAUTO_SECLISTS` env var. Per-list overrides
+(`--wordlist-dirs`, `--wordlist-users`, `--wordlist-pass`) still win. Run
+`ctfauto --check` to see the SecLists root and exactly which wordlist resolves for
+each purpose.
 
 Useful flags: `--no-udp` / `--no-nse-vuln` (skip the slow passes),
 `--no-default-creds` (disable the default-cred checks, which are on by default),
-`--hostname box.htb` (force a vhost), `-j N` (concurrency override),
-`--yes` (skip the authorization prompt), `-o DIR` (output dir, default `loot/`).
+`--hostname box.htb` (force a vhost), `--seclists-dir PATH` (SecLists location),
+`-j N` (concurrency override), `--yes` (skip the authorization prompt),
+`-o DIR` (output dir, default `loot/`).
 
 ## Output
 

@@ -142,6 +142,7 @@ class RunConfig:
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
     allow_external: bool = False     # explicit opt-in to actively touch an external target
     events_path: str = ""            # NDJSON event log path (issue #25); "" = disabled
+    seclists_dir: str = ""           # override SecLists root (else auto-detect / $CTFAUTO_SECLISTS)
 
 
 def classify_target(target: str) -> str:

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from ..config import RunConfig
 from ..modules.recon import HostResult, Service
 from ..util import good, info, run, warn, warn_once, parallel_map
+from .. import wordlists
 
 
 @dataclass
@@ -145,7 +146,7 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     #    present, else gobuster. Gated by profile.enable_dirbust.
     found_dirs: list[str] = []
     if cfg.profile.enable_dirbust:
-        wl = _resolve_dir_wordlist(cfg)
+        wl = wordlists.directory_wordlist(cfg, cfg.wordlist_dirs)
         if not wl:
             warn_once("no-dir-wordlist",
                       "no directory wordlist found (set --wordlist-dirs); dir-busting skipped.")
@@ -165,10 +166,12 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                 out.append(EnumFinding(svc.port, "gobuster", f"{len(found_dirs)} path(s)",
                                        "\n".join(found_dirs)))
 
-    # 5. vhost discovery (only meaningful when we have a hostname/.htb)
+    # 5. vhost discovery (only meaningful when we have a hostname/.htb).
+    #    Wordlist resolved via the SecLists resolver (with fallbacks) so it works
+    #    regardless of how SecLists was installed — was a hardcoded path (#27).
     if cfg.hostname and _have(cfg, "ffuf", quiet=True):
-        vwl = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
-        if os.path.exists(vwl):
+        vwl = wordlists.vhost_wordlist(cfg)
+        if vwl:
             rc, vf, _ = run(["ffuf", "-u", f"{scheme}://{cfg.target}:{svc.port}/",
                              "-H", f"Host: FUZZ.{cfg.hostname}", "-w", vwl,
                              "-mc", "200,301,302,403", "-s"], timeout=180)
@@ -176,6 +179,10 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
             if subs:
                 out.append(EnumFinding(svc.port, "ffuf-vhost", f"{len(subs)} vhost(s)",
                                        "\n".join(subs)))
+        else:
+            warn_once("no-vhost-wordlist",
+                      "no vhost/subdomain wordlist found (install SecLists or set "
+                      "--seclists-dir); vhost discovery skipped.")
 
     # 5b. Parameterized-URL discovery — feed the web-exploit stage real targets.
     #     Crawl the homepage + any found dirs for links carrying query strings.
@@ -203,36 +210,17 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                 out.append(EnumFinding(svc.port, "droopescan", f"{cms} scan", ds.strip()[-3000:]))
 
 
-# Common locations a directory wordlist might live, in preference order (#27).
-_DIR_WORDLIST_CANDIDATES = [
-    "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt",
-    "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt",
-    "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
-    "/usr/share/wordlists/dirb/common.txt",
-    "/usr/share/wordlists/dirb/big.txt",
-]
-
-
-def _resolve_dir_wordlist(cfg: RunConfig) -> str:
-    """Return a usable directory wordlist path: the user's --wordlist-dirs if it
-    exists, else the first known location present on disk, else ''."""
-    if cfg.wordlist_dirs and os.path.exists(cfg.wordlist_dirs):
-        return cfg.wordlist_dirs
-    if cfg.wordlist_dirs:
-        warn_once("bad-dir-wordlist",
-                  f"--wordlist-dirs {cfg.wordlist_dirs} not found; trying defaults.")
-    for p in _DIR_WORDLIST_CANDIDATES:
-        if os.path.exists(p):
-            return p
-    return ""
-
-
 def _arjun_params(cfg: RunConfig, base: str) -> list[str]:
     """Use arjun to discover hidden GET parameters, returned as base?param=1 URLs
     so the sqlmap/LFI stage can test them. Best-effort; empty on any failure."""
     import json as _json
     out_file = os.path.join(cfg.out_dir, "arjun.json")
-    rc, _, _ = run(["arjun", "-u", base, "-m", "GET", "-oJ", out_file, "-q"], timeout=180)
+    cmd = ["arjun", "-u", base, "-m", "GET", "-oJ", out_file, "-q"]
+    # Feed arjun the SecLists parameter wordlist when we have it (bigger surface).
+    pwl = wordlists.param_wordlist(cfg)
+    if pwl:
+        cmd += ["-w", pwl]
+    rc, _, _ = run(cmd, timeout=180)
     urls: list[str] = []
     try:
         with open(out_file) as f:
