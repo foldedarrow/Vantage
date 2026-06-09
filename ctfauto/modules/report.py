@@ -49,10 +49,19 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
     L.append(f"- **Generated:** {datetime.now().isoformat(timespec='seconds')}")
     if cfg.hostname:
         L.append(f"- **Hostname:** {cfg.hostname}")
+    L.append(f"- **Classification:** {getattr(cfg, 'klass', '?')}")
     L.append(f"- **Profile:** {cfg.profile.name}")
     L.append(f"- **Aggressive:** {cfg.aggressive}")
     if host.os_guess:
         L.append(f"- **OS guess:** {host.os_guess}")
+    L.append("")
+    # Captured flags float to the very top — the headline result on HTB.
+    flags = list(getattr(postex, "flags", []) or [])
+    if flags:
+        L.append("> 🚩 **Flags captured:** " + ", ".join(f"`{f}`" for f in flags))
+        L.append("")
+    L.append("> ⚠️ _Loot under the output dir (`gitloot/`, `sqlmap/`, raw scans) may "
+             "contain credentials or PII. Handle accordingly._")
     L.append("")
 
     L.append("## Open services\n")
@@ -108,12 +117,30 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
     else:
         L.append("_No exploit candidates identified._\n")
 
-    if postex and (postex.notes or postex.privesc_output):
+    has_postex = postex and (postex.notes or getattr(postex, "privesc_output", None)
+                             or getattr(postex, "proof", None)
+                             or getattr(postex, "privesc_leads", None))
+    if has_postex:
         L.append("## Post-exploitation\n")
-        for n in postex.notes:
-            L.append(f"- {n}")
-        for k, v in postex.privesc_output.items():
-            L.append(f"\n### {k}\n```\n{v.strip()[:3000]}\n```")
+        leads = getattr(postex, "privesc_leads", []) or []
+        if leads:
+            L.append("**Privilege-escalation leads:**\n")
+            for lead in leads:
+                L.append(f"- {lead}")
+            L.append("")
+        proof = getattr(postex, "proof", {}) or {}
+        if proof:
+            L.append("**Confirmed access (proof):**\n")
+            for k, v in proof.items():
+                L.append(f"\n### {k} — proof\n```\n{v.strip()[:3000]}\n```")
+            L.append("")
+        if postex.notes:
+            L.append("**Notes:**\n")
+            for n in postex.notes:
+                L.append(f"- {n}")
+            L.append("")
+        for k, v in (getattr(postex, "privesc_output", {}) or {}).items():
+            L.append(f"\n### {k} — enum output\n```\n{v.strip()[:3000]}\n```")
         L.append("")
 
     L.append("---")

@@ -5,45 +5,105 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# ANSI colors (no dependency on external libs)
+# Auto-disable ANSI colour when output isn't a TTY (logs/pipes stay clean).
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _c(code: str) -> str:
+    return code if _USE_COLOR else ""
+
+
+# ANSI colors (no dependency on external libs). Empty strings when colour off.
 class C:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    CYAN = "\033[36m"
-    GREY = "\033[90m"
+    RESET = _c("\033[0m")
+    BOLD = _c("\033[1m")
+    RED = _c("\033[31m")
+    GREEN = _c("\033[32m")
+    YELLOW = _c("\033[33m")
+    BLUE = _c("\033[34m")
+    CYAN = _c("\033[36m")
+    GREY = _c("\033[90m")
+
+
+# Worker threads all write to stdout; serialise to avoid interleaved lines (#19).
+_print_lock = threading.Lock()
 
 
 def stamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
+def _emit(msg: str, stream=None) -> None:
+    with _print_lock:
+        print(msg, file=stream) if stream else print(msg)
+
+
 def info(msg: str) -> None:
-    print(f"{C.GREY}[{stamp()}]{C.RESET} {C.BLUE}[*]{C.RESET} {msg}")
+    _emit(f"{C.GREY}[{stamp()}]{C.RESET} {C.BLUE}[*]{C.RESET} {msg}")
 
 
 def good(msg: str) -> None:
-    print(f"{C.GREY}[{stamp()}]{C.RESET} {C.GREEN}[+]{C.RESET} {msg}")
+    _emit(f"{C.GREY}[{stamp()}]{C.RESET} {C.GREEN}[+]{C.RESET} {msg}")
 
 
 def warn(msg: str) -> None:
-    print(f"{C.GREY}[{stamp()}]{C.RESET} {C.YELLOW}[!]{C.RESET} {msg}")
+    _emit(f"{C.GREY}[{stamp()}]{C.RESET} {C.YELLOW}[!]{C.RESET} {msg}")
 
 
 def err(msg: str) -> None:
-    print(f"{C.GREY}[{stamp()}]{C.RESET} {C.RED}[-]{C.RESET} {msg}", file=sys.stderr)
+    _emit(f"{C.GREY}[{stamp()}]{C.RESET} {C.RED}[-]{C.RESET} {msg}", stream=sys.stderr)
 
 
 def banner(text: str) -> None:
     bar = "=" * (len(text) + 4)
-    print(f"\n{C.BOLD}{C.CYAN}{bar}\n  {text}\n{bar}{C.RESET}")
+    _emit(f"\n{C.BOLD}{C.CYAN}{bar}\n  {text}\n{bar}{C.RESET}")
+
+
+# --- warn-once (issue #18) ---------------------------------------------------
+_warned_once: set[str] = set()
+
+
+def warn_once(key: str, msg: str) -> None:
+    """Emit a warning only the first time for a given key (e.g. a tool name)."""
+    if key in _warned_once:
+        return
+    _warned_once.add(key)
+    warn(msg)
+
+
+# --- NDJSON event log (issue #25) --------------------------------------------
+_events_lock = threading.Lock()
+
+
+def events_init(path: str) -> None:
+    """Truncate/create the NDJSON event log for a fresh run."""
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        open(path, "w").close()
+    except OSError:
+        pass
+
+
+def event(cfg, kind: str, **fields) -> None:
+    """Append one NDJSON event. cfg may be a RunConfig (uses cfg.events_path)
+    or a path string. Never raises — telemetry must not break a run."""
+    path = getattr(cfg, "events_path", cfg if isinstance(cfg, str) else "")
+    if not path:
+        return
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": kind}
+    rec.update(fields)
+    try:
+        with _events_lock, open(path, "a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
+    except OSError:
+        pass
 
 
 def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, str, str]:

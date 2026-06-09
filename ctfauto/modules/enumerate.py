@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from ..config import RunConfig
 from ..modules.recon import HostResult, Service
-from ..util import good, info, run, warn, parallel_map
+from ..util import good, info, run, warn, warn_once, parallel_map
 
 
 @dataclass
@@ -44,7 +44,8 @@ def _have(cfg: RunConfig, tool: str, quiet: bool = False) -> bool:
     if cfg.discovered_tools.get(tool):
         return True
     if not quiet:
-        warn(f"{tool} not installed — skipping that enumeration step.")
+        # warn only once per tool across the whole run, not per service (#18)
+        warn_once(f"missing:{tool}", f"{tool} not installed — skipping steps that use it.")
     return False
 
 
@@ -131,26 +132,38 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                                        f"/{path} -> HTTP {code}",
                                        tags={"path": path}))
 
-    # 3. Nikto
-    if _have(cfg, "nikto"):
+    # 3. Nikto — loud; only when the profile allows it (off on gentle/HTB, #14)
+    if cfg.profile.enable_nikto and _have(cfg, "nikto"):
         rc, nk, _ = run(["nikto", "-host", base, "-maxtime", "120s", "-nointeractive"], timeout=200)
         hits = [l for l in nk.splitlines() if l.strip().startswith("+")]
         if hits:
             out.append(EnumFinding(svc.port, "nikto", f"{len(hits)} item(s)", "\n".join(hits)))
+    elif not cfg.profile.enable_nikto:
+        info(f"nikto skipped on {cfg.profile.name} profile (noisy)")
 
-    # 4. Directory busting (initial pass)
+    # 4. Directory busting (initial pass). Prefer feroxbuster (recursion) if
+    #    present, else gobuster. Gated by profile.enable_dirbust.
     found_dirs: list[str] = []
-    if _have(cfg, "gobuster"):
-        wl = cfg.wordlist_dirs or "/usr/share/wordlists/dirb/common.txt"
-        if os.path.exists(wl):
+    if cfg.profile.enable_dirbust:
+        wl = _resolve_dir_wordlist(cfg)
+        if not wl:
+            warn_once("no-dir-wordlist",
+                      "no directory wordlist found (set --wordlist-dirs); dir-busting skipped.")
+        elif _have(cfg, "feroxbuster", quiet=True):
+            rc, fx, _ = run(["feroxbuster", "-u", base, "-w", wl, "-q", "-d", "2",
+                             "-t", str(cfg.profile.http_threads), "--silent",
+                             "-x", "php,txt,html"], timeout=400)
+            found_dirs = [l.strip() for l in fx.splitlines() if l.strip().startswith("http")]
+            if found_dirs:
+                out.append(EnumFinding(svc.port, "feroxbuster", f"{len(found_dirs)} path(s)",
+                                       "\n".join(found_dirs[:200])))
+        elif _have(cfg, "gobuster"):
             rc, gb, _ = run(["gobuster", "dir", "-u", base, "-w", wl, "-q",
                              "-t", str(cfg.profile.http_threads), "--no-error"], timeout=300)
             found_dirs = [l.strip() for l in gb.splitlines() if l.strip()]
             if found_dirs:
                 out.append(EnumFinding(svc.port, "gobuster", f"{len(found_dirs)} path(s)",
                                        "\n".join(found_dirs)))
-        else:
-            warn(f"wordlist not found: {wl} (set --wordlist-dirs)")
 
     # 5. vhost discovery (only meaningful when we have a hostname/.htb)
     if cfg.hostname and _have(cfg, "ffuf", quiet=True):
@@ -165,9 +178,13 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                                        "\n".join(subs)))
 
     # 5b. Parameterized-URL discovery — feed the web-exploit stage real targets.
-    #     Crawl the homepage + any found dirs for links containing query strings.
-    if _have(cfg, "curl", quiet=True):
+    #     Crawl the homepage + any found dirs for links carrying query strings.
+    #     Only when the profile permits active web (so we don't tee up sqlmap/LFI
+    #     against HTB shared infra). arjun augments this if installed (#23).
+    if cfg.profile.enable_active_web and _have(cfg, "curl", quiet=True):
         param_urls = _discover_param_urls(cfg, base, found_dirs)
+        if _have(cfg, "arjun", quiet=True):
+            param_urls = list(dict.fromkeys(param_urls + _arjun_params(cfg, base)))
         for u in param_urls:
             out.append(EnumFinding(svc.port, "param-url", f"parameterized URL: {u}",
                                    tags={"param_url": u}))
@@ -184,6 +201,49 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
             rc, ds, _ = run(["droopescan", "scan", cms, "-u", base], timeout=240)
             if ds.strip():
                 out.append(EnumFinding(svc.port, "droopescan", f"{cms} scan", ds.strip()[-3000:]))
+
+
+# Common locations a directory wordlist might live, in preference order (#27).
+_DIR_WORDLIST_CANDIDATES = [
+    "/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt",
+    "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt",
+    "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt",
+    "/usr/share/wordlists/dirb/common.txt",
+    "/usr/share/wordlists/dirb/big.txt",
+]
+
+
+def _resolve_dir_wordlist(cfg: RunConfig) -> str:
+    """Return a usable directory wordlist path: the user's --wordlist-dirs if it
+    exists, else the first known location present on disk, else ''."""
+    if cfg.wordlist_dirs and os.path.exists(cfg.wordlist_dirs):
+        return cfg.wordlist_dirs
+    if cfg.wordlist_dirs:
+        warn_once("bad-dir-wordlist",
+                  f"--wordlist-dirs {cfg.wordlist_dirs} not found; trying defaults.")
+    for p in _DIR_WORDLIST_CANDIDATES:
+        if os.path.exists(p):
+            return p
+    return ""
+
+
+def _arjun_params(cfg: RunConfig, base: str) -> list[str]:
+    """Use arjun to discover hidden GET parameters, returned as base?param=1 URLs
+    so the sqlmap/LFI stage can test them. Best-effort; empty on any failure."""
+    import json as _json
+    out_file = os.path.join(cfg.out_dir, "arjun.json")
+    rc, _, _ = run(["arjun", "-u", base, "-m", "GET", "-oJ", out_file, "-q"], timeout=180)
+    urls: list[str] = []
+    try:
+        with open(out_file) as f:
+            data = _json.load(f)
+        # arjun JSON: { "<url>": { "params": [...], ... }, ... }
+        for url, info_d in data.items():
+            for p in info_d.get("params", []):
+                urls.append(f"{url}{'&' if '?' in url else '?'}{p}=1")
+    except (OSError, ValueError, AttributeError):
+        pass
+    return urls
 
 
 def _discover_param_urls(cfg: RunConfig, base: str, found_dirs: list[str]) -> list[str]:
@@ -253,20 +313,38 @@ def _enum_smb(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
 
 
 # --- SNMP --------------------------------------------------------------------
+_SNMP_COMMUNITIES = ["public", "private", "community"]
+
+
+def _parse_onesixtyone_community(out: str) -> str:
+    """onesixtyone prints e.g. '10.0.0.5 [public] Hardware: ...'. Return the
+    first community string found inside [brackets], or '' if none."""
+    m = re.search(r"\[([^\]]+)\]", out)
+    return m.group(1).strip() if m else ""
+
+
 def _enum_snmp(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     community = ""
     if _have(cfg, "onesixtyone"):
-        rc, o, _ = run(["onesixtyone", cfg.target, "public", "private", "community"], timeout=60)
-        if "public" in o.lower() or "[" in o:
-            community = "public"
-            out.append(EnumFinding(svc.port, "onesixtyone", "SNMP community string found",
-                                   o.strip()[:800], tags={"snmp_community": "public"}))
-    if (community or True) and _have(cfg, "snmpwalk"):
-        rc, sw, _ = run(["snmpwalk", "-v2c", "-c", "public", "-t", "5", cfg.target], timeout=120)
+        rc, o, _ = run(["onesixtyone", cfg.target, *_SNMP_COMMUNITIES], timeout=60)
+        found = _parse_onesixtyone_community(o)
+        if found:
+            community = found  # use the ACTUAL string, not a hardcoded 'public' (#8)
+            out.append(EnumFinding(svc.port, "onesixtyone",
+                                   f"SNMP community string found: {community}",
+                                   o.strip()[:800], tags={"snmp_community": community}))
+
+    # snmpwalk with whichever community we found (default to 'public' as a probe
+    # if onesixtyone didn't run/return). The 'or True' dead-guard is gone (#8).
+    walk_comm = community or "public"
+    if _have(cfg, "snmpwalk"):
+        rc, sw, _ = run(["snmpwalk", "-v2c", "-c", walk_comm, "-t", "5", cfg.target], timeout=120)
         if rc == 0 and sw.strip():
-            out.append(EnumFinding(svc.port, "snmpwalk", "SNMP tree readable with 'public'",
-                                   sw.strip()[:2500], tags={"snmp_community": "public"}))
+            out.append(EnumFinding(svc.port, "snmpwalk",
+                                   f"SNMP tree readable with '{walk_comm}'",
+                                   sw.strip()[:2500], tags={"snmp_community": walk_comm}))
     elif _have(cfg, "snmp-check", quiet=True):
+        # Now genuinely reachable when snmpwalk is absent (was dead code, #8).
         rc, sc, _ = run(["snmp-check", cfg.target], timeout=120)
         if rc == 0 and sc.strip():
             out.append(EnumFinding(svc.port, "snmp-check", "SNMP details", sc.strip()[:2500]))

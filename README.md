@@ -15,17 +15,30 @@ The exploitation stage is **gated**, not a free-for-all:
 
 | Behavior | When it runs |
 |---|---|
-| Recon + enumeration + exploit **identification** | Always |
+| Recon + enumeration + exploit **identification** | Always (lab/HTB; external needs opt-in) |
 | **SAFE** auto-exploit (non-destructive backdoors that just hand you a shell — vsftpd 2.3.4, UnrealIRCd, distccd, Samba usermap) | Lab targets, with `--auto-exploit` |
-| Brute-force + destructive / flaky modules | Only with `--aggressive` (lab targets only) |
+| Default-credential checks + active web (sqlmap/LFI/CMS, `.git` dump) | Lab targets, with `--auto-exploit` |
+| Brute-force (hydra, bounded) + escalated sqlmap | Only with `--aggressive` (lab targets only) |
 | Nothing fired, commands printed for you to run | `--identify-only` |
 
-**HackTheBox is treated specially.** HTB's rules prohibit aggressive/automated
-mass-scanning of their shared infrastructure. Targets in HTB ranges
-(`10.10.10/24`, `10.10.11/24`, `10.129/16`) are auto-forced to the **gentle**
-profile: top-1000 ports, `-T2` timing, no auto-exploit, and `--aggressive` is
-ignored. Use it on HTB for recon/enum and to *identify* exploits, then run the
-printed commands yourself within HTB's rules.
+**Target classification drives everything.** Targets are classified `lab`
+(RFC1918), `htb` (HackTheBox ranges), or `external` (anything else — a
+public/unknown IP):
+
+- **`external` targets are refused by default.** ctfauto won't scan or exploit a
+  public/unknown IP — even `--identify-only`, which still sends real scan traffic
+  — unless you pass `--allow-external`, asserting written authorization. Even then
+  the target gets the cautious gentle profile.
+- **HackTheBox is treated specially.** HTB ranges (`10.10.0.0/16`, incl. the
+  lab/release arenas and your tun0 handout, plus `10.129.0.0/16`) are auto-forced
+  to the **gentle** profile: top-1000 ports, `-T2`, no auto-exploit, no nikto, no
+  active web stage, and `--aggressive` is ignored. Add custom ranges (Pro Labs,
+  home lab) in `~/.config/ctfauto/networks.json` (`{"htb": [...], "lab": [...]}`).
+- ctfauto refuses to scan **your own VPN client IP** (tun0 handout range) as a
+  target.
+
+Run `python run.py --check` (or `ctfauto --check`) any time to see which tools are
+installed and the exact install command for whatever's missing.
 
 ## What it does (phases)
 

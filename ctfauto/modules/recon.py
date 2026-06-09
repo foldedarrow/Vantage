@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import os
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 from ..config import RunConfig
-from ..util import good, info, run, warn
+from ..util import good, info, run, warn, load_state, save_state
 
 
 @dataclass
@@ -64,30 +64,77 @@ def detect_htb_hostname(cfg: RunConfig) -> str:
 
 
 def add_to_hosts(ip: str, hostname: str) -> bool:
-    """Best-effort append ip<TAB>hostname to /etc/hosts (needs root)."""
+    """Best-effort add 'ip<TAB>hostname' to /etc/hosts (needs root).
+
+    Matches the hostname as an exact whitespace-delimited token (so 'box.htb'
+    doesn't spuriously match 'devbox.htb'), and reconciles the IP if an entry
+    for this hostname already exists with a different address (#5)."""
     if not hostname:
         return False
     try:
         with open("/etc/hosts") as f:
-            if hostname in f.read():
-                return True
+            lines = f.readlines()
+    except OSError as e:
+        warn(f"could not read /etc/hosts: {e}")
+        return False
+
+    for ln in lines:
+        stripped = ln.split("#", 1)[0]
+        toks = stripped.split()
+        if hostname in toks[1:]:
+            if toks and toks[0] == ip:
+                return True  # already correct
+            warn(f"/etc/hosts already maps '{hostname}' to {toks[0] if toks else '?'}, "
+                 f"not {ip}. Leaving it; update manually if the box IP changed.")
+            return True
+    try:
         with open("/etc/hosts", "a") as f:
             f.write(f"{ip}\t{hostname}\n")
+        good(f"added '{ip} {hostname}' to /etc/hosts")
         return True
     except PermissionError:
         warn(f"need root to add '{ip} {hostname}' to /etc/hosts — add it manually.")
         return False
 
 
+def _host_to_state(host: HostResult) -> dict:
+    return {"recon": asdict(host)}
+
+
+def _host_from_state(d: dict) -> HostResult | None:
+    r = (d or {}).get("recon")
+    if not r:
+        return None
+    try:
+        host = HostResult(ip=r.get("ip", ""), hostname=r.get("hostname", ""),
+                          os_guess=r.get("os_guess", ""),
+                          nse_vuln_hits=r.get("nse_vuln_hits", []))
+        host.services = [Service(**s) for s in r.get("services", [])]
+        host.udp_services = [Service(**s) for s in r.get("udp_services", [])]
+        return host
+    except (TypeError, ValueError):
+        return None
+
+
 def scan(cfg: RunConfig) -> HostResult:
-    """Run nmap and parse results into a HostResult."""
+    """Run nmap and parse results into a HostResult. With --resume, reuse a
+    cached recon result if one exists (issue #13)."""
+    if cfg.resume:
+        cached = _host_from_state(load_state(cfg.out_dir, cfg.target))
+        if cached and cached.services:
+            good(f"--resume: reusing cached recon ({len(cached.services)} services) "
+                 f"from previous run")
+            return cached
+        info("--resume: no usable cached recon; scanning fresh.")
+
     if not cfg.discovered_tools.get("nmap"):
         warn("nmap not found on PATH — cannot run recon. Install nmap.")
         return HostResult(ip=cfg.target)
 
     xml_out = _xml_path(cfg)
-    # Full TCP scan on lab; top-ports on gentle to reduce noise on shared infra.
-    port_spec = ["-p-"] if cfg.profile.name.startswith("lab") else ["--top-ports", "1000"]
+    # Full TCP scan when the profile allows it; top-ports on gentle to reduce
+    # noise on shared infra. Keyed off the capability flag, not the name string.
+    port_spec = ["-p-"] if cfg.profile.full_tcp else ["--top-ports", "1000"]
     cmd = [
         "nmap", cfg.profile.nmap_timing,
         *cfg.profile.nmap_args.split(),
@@ -96,11 +143,14 @@ def scan(cfg: RunConfig) -> HostResult:
         cfg.target,
     ]
     rc, out, _ = run(cmd, timeout=1800)
-    if rc not in (0,) or not os.path.exists(xml_out):
-        warn("nmap did not produce parseable XML; returning empty result.")
+    if not os.path.exists(xml_out):
+        warn("nmap did not produce an XML file; returning empty result.")
         return HostResult(ip=cfg.target)
-
+    # rc may be non-zero (host-down, partial) but a usable XML can still exist;
+    # parse defensively rather than bailing on rc alone.
     host = parse_nmap_xml(xml_out)
+    if not host.services and rc != 0:
+        warn(f"nmap exited rc={rc} with no parsed services; results may be incomplete.")
 
     # UDP top-ports pass (lab profile, unless --no-udp). UDP is slow, so keep it small.
     if cfg.profile.udp_scan and not cfg.no_udp:
@@ -110,6 +160,11 @@ def scan(cfg: RunConfig) -> HostResult:
     if cfg.profile.nse_vuln and not cfg.no_nse_vuln and host.services:
         host.nse_vuln_hits = _nse_vuln_scan(cfg, host)
 
+    # Persist recon so a later --resume can skip the (slow) scan (#13).
+    try:
+        save_state(cfg.out_dir, cfg.target, _host_to_state(host))
+    except OSError:
+        pass
     return host
 
 
@@ -154,13 +209,8 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> list[str]:
     return hits
 
 
-def parse_nmap_xml(path: str) -> HostResult:
-    tree = ET.parse(path)
-    root = tree.getroot()
-    host_el = root.find("host")
-    if host_el is None:
-        return HostResult(ip="")
-
+def _parse_host_el(host_el) -> HostResult:
+    """Parse a single <host> element into a HostResult."""
     addr = ""
     for a in host_el.findall("address"):
         if a.get("addrtype") in ("ipv4", "ipv6"):
@@ -183,8 +233,12 @@ def parse_nmap_xml(path: str) -> HostResult:
         if state_el is None or state_el.get("state") != "open":
             continue
         svc_el = port_el.find("service")
+        try:
+            portid = int(port_el.get("portid"))
+        except (TypeError, ValueError):
+            continue
         svc = Service(
-            port=int(port_el.get("portid")),
+            port=portid,
             proto=port_el.get("protocol", "tcp"),
             name=(svc_el.get("name", "") if svc_el is not None else ""),
             product=(svc_el.get("product", "") if svc_el is not None else ""),
@@ -192,9 +246,39 @@ def parse_nmap_xml(path: str) -> HostResult:
             extrainfo=(svc_el.get("extrainfo", "") if svc_el is not None else ""),
         )
         result.services.append(svc)
+    return result
 
+
+def parse_nmap_xml_all(path: str) -> list[HostResult]:
+    """Parse EVERY <host> in an nmap XML file (multi-host / CIDR support, #16).
+    Defensive against truncated/malformed XML (#15): returns [] on parse error."""
+    try:
+        tree = ET.parse(path)
+    except (ET.ParseError, OSError) as e:
+        warn(f"could not parse nmap XML ({os.path.basename(path)}): {e}")
+        return []
+    root = tree.getroot()
+    hosts = []
+    for host_el in root.findall("host"):
+        # Skip hosts nmap marked as down.
+        status = host_el.find("status")
+        if status is not None and status.get("state") == "down":
+            continue
+        hosts.append(_parse_host_el(host_el))
+    return hosts
+
+
+def parse_nmap_xml(path: str) -> HostResult:
+    """Back-compat single-host parse. Returns the first up host (or empty).
+    Robust to malformed XML — never raises (#15)."""
+    hosts = parse_nmap_xml_all(path)
+    if not hosts:
+        return HostResult(ip="")
+    result = hosts[0]
     good(f"{len(result.services)} open service(s) on {result.ip or '?'}"
-         + (f" ({os_guess})" if os_guess else ""))
+         + (f" ({result.os_guess})" if result.os_guess else ""))
     for s in result.services:
         info(f"  {s.port}/{s.proto}  {s.name:12} {s.banner}")
+    if len(hosts) > 1:
+        info(f"({len(hosts)} hosts in XML; using first — multi-host sweep handles the rest)")
     return result

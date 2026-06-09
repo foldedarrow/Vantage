@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctfauto"
+version = "0.1.0"
+description = "Automated recon/enum/exploit-ID orchestrator for owned & authorized targets (HTB, Metasploitable, lab VMs)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "foldedarrow" }]
+keywords = ["pentest", "ctf", "hackthebox", "automation", "security"]
+
+# Core ctfauto is stdlib-only. The external pentest CLI tools (nmap, sqlmap,
+# metasploit, hydra, ...) are system packages, not pip deps — see setup.sh /
+# `ctfauto --check`.
+dependencies = []
+
+[project.optional-dependencies]
+# Driving Metasploit's RPC API for post-exploitation.
+msf = ["pymetasploit3>=1.0"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+ctfauto = "ctfauto.cli:main"
+
+[tool.setuptools]
+packages = ["ctfauto", "ctfauto.modules"]

@@ -1,0 +1,5 @@
+# ctfauto core is stdlib-only — nothing required to run the pipeline.
+#
+# Optional: drive Metasploit's RPC API for the post-exploitation stage.
+#   pip install -r requirements.txt
+pymetasploit3>=1.0
