@@ -309,6 +309,19 @@ def _discover_param_urls(cfg: RunConfig, base: str, found_dirs: list[str]) -> li
         path = line.split()[0] if line.split() else ""
         if path.startswith("/"):
             pages.append(base + path)
+    # In-scope hosts: the target IP and any resolved hostname. We must NOT tee up
+    # sqlmap/LFI against an EXTERNAL host linked from the page (e.g. Tomcat's docs
+    # link to issues.apache.org) — that would send active attack traffic
+    # off-target. Absolute links to other hosts are dropped.
+    import urllib.parse as _up
+    in_scope = {cfg.target.lower()}
+    if cfg.hostname:
+        in_scope.add(cfg.hostname.lower())
+
+    def _same_host(u: str) -> bool:
+        host = _up.urlparse(u).hostname
+        return (host or "").lower() in in_scope
+
     href_re = re.compile(r'(?:href|src|action)\s*=\s*["\']([^"\']+)["\']', re.I)
     for page in pages[:8]:
         rc, body, _ = run(["curl", "-sk", "--max-time", "10", page], timeout=15)
@@ -316,7 +329,15 @@ def _discover_param_urls(cfg: RunConfig, base: str, found_dirs: list[str]) -> li
             continue
         for m in href_re.findall(body):
             if "?" in m and "=" in m.split("?", 1)[1]:
-                url = m if m.startswith("http") else base + ("" if m.startswith("/") else "/") + m
+                if m.startswith("http"):
+                    # absolute URL: keep only if it points back at the target host
+                    if not _same_host(m):
+                        continue
+                    url = m
+                elif m.startswith("//"):
+                    continue  # protocol-relative to another host — skip
+                else:
+                    url = base + ("" if m.startswith("/") else "/") + m
                 # strip the value, keep param skeleton, dedupe by path+param-name
                 key = url.split("=")[0]
                 if key not in seen:

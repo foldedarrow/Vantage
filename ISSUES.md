@@ -355,6 +355,34 @@ in the gitignored JSON/loot.
 
 ---
 
+## Field-test fixes — run 2 (Metasploitable 2, bridged network)
+
+Second live run (network now bridged, recon perfect — full 30-port fingerprint).
+Surfaced the exploitation bugs. Suite now **92 green**.
+
+- **MSF exploits aborted on missing LHOST** — every curated backdoor (vsftpd,
+  Samba, distcc, UnrealIRCd) ran `use …; set RHOSTS; run` with no payload set, so
+  MSF chose a reverse payload, had no LHOST, and aborted with
+  `OptionValidateError: LHOST` *before firing*. Fixed: `exploit._msf_command`
+  now sets an explicit BIND/interact payload per module (no callback needed) and
+  also sets LHOST (via `util.local_ip_for`, the source IP toward the target) for
+  any module without a curated payload. Tests: `TestMsfCommand`.
+- **Param-URL scope leak** — the web crawler scraped an absolute external link
+  (Tomcat docs → `issues.apache.org`) and teed up sqlmap/LFI against it, i.e. it
+  would have sent active attack traffic OFF-TARGET. `_discover_param_urls` now
+  drops absolute and protocol-relative links whose host isn't the target/hostname.
+  Tests: `TestParamUrlScope`.
+- **Dual-port duplicate display** — UnrealIRCd (6667/6697) and Java RMI
+  (1099/39503) showed twice in the report. Running was already deduped by
+  msf_module; now `auto_exploit` prunes `res.candidates` up front so the report
+  matches what actually ran. Tests: `TestDualPortDedupe`.
+
+What worked this run: recon (bridging fixed the tcpwrapped issue), NSE grouping,
+secret redaction, and a confirmed win — `tomcat:****` default creds on the :8180
+Manager.
+
+---
+
 ## Field-test fixes (first live Metasploitable 2 run)
 
 The first real run surfaced bugs unit tests couldn't. All fixed, suite now

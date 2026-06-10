@@ -569,5 +569,149 @@ class TestCVEBridge(unittest.TestCase):
         self.assertEqual(len(vsftpd), 1)
 
 
+class TestExternalProfilePrompt(unittest.TestCase):
+    """Authorized external targets prompt for lab-vs-gentle instead of forcing
+    gentle. --profile lab / --yes skip the prompt; auto prompts."""
+    from ctfauto import cli as _CLI
+
+    def _cfg(self, *extra):
+        args = self._CLI.build_parser().parse_args(
+            ["203.0.113.5", "--allow-external", "--auto-exploit", *extra])
+        return self._CLI.build_config(args)
+
+    def test_external_starts_gentle_on_auto(self):
+        cfg = self._cfg()
+        self.assertEqual(cfg.klass, "external")
+        self.assertIn("gentle", cfg.profile.name)
+        self.assertTrue(cfg.profile_is_auto)
+
+    def test_yes_to_upgrade_gives_lab(self):
+        cfg = self._cfg()
+        with mock.patch("builtins.input", side_effect=["y", "y"]):
+            ok = self._CLI.authorization_gate(cfg, assume_yes=False, allow_external=True)
+        self.assertTrue(ok)
+        self.assertIn("lab", cfg.profile.name)
+
+    def test_no_to_upgrade_stays_gentle(self):
+        cfg = self._cfg()
+        with mock.patch("builtins.input", side_effect=["n", "y"]):
+            ok = self._CLI.authorization_gate(cfg, assume_yes=False, allow_external=True)
+        self.assertTrue(ok)
+        self.assertIn("gentle", cfg.profile.name)
+
+    def test_explicit_lab_profile_skips_prompt(self):
+        cfg = self._cfg("--profile", "lab")
+        self.assertIn("lab", cfg.profile.name)
+        self.assertFalse(cfg.profile_is_auto)
+        # only ONE input call expected (the authorization confirm), no upgrade prompt
+        with mock.patch("builtins.input", side_effect=["y"]) as m:
+            ok = self._CLI.authorization_gate(cfg, assume_yes=False, allow_external=True)
+        self.assertTrue(ok)
+        self.assertEqual(m.call_count, 1)
+
+    def test_yes_flag_no_prompt_keeps_gentle(self):
+        cfg = self._cfg()
+        # --yes path: no interactive upgrade, external stays gentle
+        ok = self._CLI.authorization_gate(cfg, assume_yes=True, allow_external=True)
+        self.assertTrue(ok)
+        self.assertIn("gentle", cfg.profile.name)
+
+    def test_external_aggressive_allowed_with_allow_external(self):
+        cfg = self._cfg("--aggressive")
+        self.assertTrue(cfg.aggressive)
+
+    def test_external_aggressive_blocked_without_allow_external(self):
+        args = self._CLI.build_parser().parse_args(["203.0.113.5", "--aggressive"])
+        cfg = self._CLI.build_config(args)
+        self.assertFalse(cfg.aggressive)
+
+
+class TestMsfCommand(unittest.TestCase):
+    """LHOST / payload selection — the missing-LHOST abort that failed every
+    backdoor on the first live run."""
+    def test_known_module_uses_bind_payload(self):
+        cmd = E._msf_command("exploit/multi/samba/usermap_script", "10.0.0.5", "10.0.0.9")
+        self.assertIn("set PAYLOAD cmd/unix/bind_netcat", cmd)
+        self.assertIn("set RHOSTS 10.0.0.5", cmd)
+
+    def test_vsftpd_uses_interact_payload(self):
+        cmd = E._msf_command("exploit/unix/ftp/vsftpd_234_backdoor", "10.0.0.5", "10.0.0.9")
+        self.assertIn("cmd/unix/interact", cmd)
+
+    def test_unknown_module_sets_lhost(self):
+        cmd = E._msf_command("exploit/some/unknown_module", "10.0.0.5", "10.0.0.9")
+        self.assertIn("set LHOST 10.0.0.9", cmd)
+
+    def test_lhost_set_when_available(self):
+        # even bind-payload modules get LHOST set (harmless, some modules ref it)
+        cmd = E._msf_command("exploit/multi/samba/usermap_script", "10.0.0.5", "10.0.0.9")
+        self.assertIn("set LHOST 10.0.0.9", cmd)
+
+    def test_local_ip_for_returns_something_or_empty(self):
+        # don't assert a specific IP (env-dependent); just that it's a str
+        ip = U.local_ip_for("10.0.0.5")
+        self.assertIsInstance(ip, str)
+
+
+class TestParamUrlScope(unittest.TestCase):
+    """Discovered param URLs must stay on the target host (no off-target sqlmap)."""
+    def _run(self, cfg, body):
+        with mock.patch.object(EN, "run", return_value=(0, body, "")):
+            return EN._discover_param_urls(cfg, f"http://{cfg.target}", [])
+
+    def test_external_absolute_link_dropped(self):
+        cfg = RunConfig(target="192.168.8.104", profile=Profile.lab())
+        body = ('<a href="http://issues.apache.org/bugzilla/buglist.cgi?bug_status=NEW">x</a>'
+                '<a href="/local.php?id=1">y</a>')
+        urls = self._run(cfg, body)
+        self.assertTrue(all("apache.org" not in u for u in urls), urls)
+        self.assertTrue(any("local.php" in u for u in urls), urls)
+
+    def test_same_host_absolute_kept(self):
+        cfg = RunConfig(target="192.168.8.104", profile=Profile.lab())
+        body = '<a href="http://192.168.8.104/app.php?q=1">x</a>'
+        urls = self._run(cfg, body)
+        self.assertTrue(any("app.php" in u for u in urls), urls)
+
+    def test_protocol_relative_dropped(self):
+        cfg = RunConfig(target="192.168.8.104", profile=Profile.lab())
+        body = '<a href="//evil.com/x.php?a=1">x</a>'
+        urls = self._run(cfg, body)
+        self.assertEqual(urls, [])
+
+
+class TestDualPortDedupe(unittest.TestCase):
+    def test_irc_dual_port_collapses(self):
+        h = R.HostResult(ip="10.0.0.5")
+        h.services = [_svc(6667, "irc", product="UnrealIRCd"),
+                      _svc(6697, "irc", product="UnrealIRCd")]
+        ded = E._dedupe(E._signature_candidates(h))
+        irc = [c for c in ded
+               if c.msf_module == "exploit/unix/irc/unreal_ircd_3281_backdoor"]
+        self.assertEqual(len(irc), 1)
+
+    def test_rmi_dual_port_collapses(self):
+        h = R.HostResult(ip="10.0.0.5")
+        h.services = [_svc(1099, "java-rmi"), _svc(39503, "java-rmi")]
+        ded = E._dedupe(E._signature_candidates(h))
+        rmi = [c for c in ded
+               if c.msf_module == "exploit/multi/misc/java_rmi_server"]
+        self.assertEqual(len(rmi), 1)
+
+    def test_auto_exploit_prunes_candidate_list(self):
+        # identify-only path still dedupes res.candidates for the report
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab(), identify_only=True)
+        h = R.HostResult(ip="10.0.0.5")
+        h.services = [_svc(6667, "irc", product="UnrealIRCd"),
+                      _svc(6697, "irc", product="UnrealIRCd")]
+        res = E.ExploitResult()
+        for c in E._signature_candidates(h):
+            res.add(c)
+        E.auto_exploit(cfg, h, res)
+        irc = [c for c in res.candidates
+               if c.msf_module == "exploit/unix/irc/unreal_ircd_3281_backdoor"]
+        self.assertEqual(len(irc), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

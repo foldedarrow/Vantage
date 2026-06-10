@@ -69,7 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Explicitly authorize ACTIVE testing of a target outside known "
                         "lab/HTB ranges (a public/unknown IP). Required before ctfauto "
                         "will scan or exploit such a target — you are asserting you have "
-                        "written permission.")
+                        "written permission. On --profile auto you'll be prompted to "
+                        "choose the gentle or full lab profile; pass --profile lab (or "
+                        "--aggressive) to opt into aggressive automation directly.")
     p.add_argument("--identify-only", action="store_true",
                    help="Recon + enum + list exploits, but never fire anything")
     p.add_argument("--check", "--doctor", dest="check", action="store_true",
@@ -218,6 +220,28 @@ def _is_own_vpn_ip(target: str) -> bool:
     return any(ip in net for net in OWN_VPN_HINT_NETWORKS)
 
 
+def _prompt_external_profile(cfg: RunConfig) -> None:
+    """Ask the operator whether an authorized external target should use the loud
+    'lab' profile (full aggressive automation) or stay on 'gentle'. Mutates
+    cfg.profile in place. Defaults to gentle on empty/EOF (the safe choice)."""
+    print(f"\n{C.YELLOW}This external target is on the GENTLE profile by default "
+          f"(quieter recon-led pass, no auto-exploit).{C.RESET}")
+    print("The LAB profile is full aggressive automation: -p- -T4, nikto, "
+          "dir-busting, NSE vuln scripts, and auto-exploitation. It is LOUD and "
+          "can lock accounts or crash services — only choose it if your written "
+          "authorization covers that level of intrusiveness.")
+    try:
+        ans = input(f"{C.YELLOW}Use the full LAB (aggressive) profile for "
+                    f"{cfg.target}? [y/N]: {C.RESET}")
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans.strip().lower() in ("y", "yes"):
+        cfg.profile = Profile.lab()
+        good(f"external target upgraded to LAB profile: {cfg.profile.name}")
+    else:
+        info(f"keeping GENTLE profile: {cfg.profile.name}")
+
+
 def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -> bool:
     """Returns True if the run is authorized to proceed to ACTIVE phases.
 
@@ -257,8 +281,17 @@ def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -
     if assume_yes:
         if klass == "external" and not allow_external:
             return False  # belt-and-suspenders; already handled above
+        # With --yes we don't prompt; external stays on whatever profile was set
+        # (gentle by default, or lab if the operator passed --profile lab).
         info("--yes supplied; proceeding.")
         return True
+
+    # Authorized external target on --profile auto: let the operator choose the
+    # profile instead of silently forcing gentle. Lab = full aggressive automation
+    # (loud, can lock accounts / crash services); gentle = quieter recon-led pass.
+    if klass == "external" and allow_external and getattr(cfg, "profile_is_auto", True):
+        _prompt_external_profile(cfg)
+
     try:
         prompt = (f"\n{C.YELLOW}Confirm you own or are explicitly authorized to test "
                   f"{cfg.target} [y/N]: {C.RESET}")
@@ -316,21 +349,31 @@ def cloud_authorization_gate(cfg: RunConfig, assume_yes: bool) -> bool:
 def build_config(args) -> RunConfig:
     klass, target = _resolve_and_classify(args.target)
 
-    # Profile selection. External is forced to gentle and cannot auto-exploit
-    # unless the user *also* opted into --allow-external (handled at the gate);
-    # we still never give external the loud lab profile automatically.
+    # Profile selection.
+    #   --profile gentle/lab : explicit, always honoured (even for external).
+    #   --profile auto       : lab->lab, htb->gentle. For external we DEFER the
+    #                          choice to the authorization gate, which prompts the
+    #                          operator to pick lab vs gentle (was force-gentle).
     if args.profile == "gentle":
         profile = Profile.gentle()
     elif args.profile == "lab":
         profile = Profile.lab()
     else:  # auto
-        profile = Profile.lab() if klass == "lab" else Profile.gentle()
+        if klass == "lab":
+            profile = Profile.lab()
+        elif klass == "external":
+            # placeholder; the gate will upgrade to lab if the operator confirms.
+            profile = Profile.gentle()
+        else:  # htb
+            profile = Profile.gentle()
 
     if args.parallelism > 0:
         profile.parallelism = args.parallelism
 
-    # --aggressive is lab-only. Never on htb (shared infra) or external.
-    aggressive = args.aggressive and klass == "lab"
+    # --aggressive is lab-only by default, but an explicitly-authorized external
+    # target may opt into it (the operator asserts scope via --allow-external).
+    aggressive = args.aggressive and (klass == "lab" or
+                                      (klass == "external" and args.allow_external))
 
     cfg = RunConfig(
         target=target,
@@ -365,8 +408,11 @@ def build_config(args) -> RunConfig:
 
     if args.aggressive and klass == "htb":
         warn("--aggressive ignored: target is HTB shared infra.")
-    if args.aggressive and klass == "external":
-        warn("--aggressive ignored: external targets never get aggressive automation.")
+    if args.aggressive and klass == "external" and not args.allow_external:
+        warn("--aggressive ignored: external target needs --allow-external too.")
+    # remember whether the operator left profile selection on 'auto' so the gate
+    # knows it's allowed to prompt for an external profile upgrade.
+    cfg.profile_is_auto = (args.profile == "auto")
     return cfg
 
 

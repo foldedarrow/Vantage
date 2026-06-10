@@ -143,6 +143,7 @@ class RunConfig:
     # --- scope / authorization (issues #1, #2, #4) ----------------------------
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
     allow_external: bool = False     # explicit opt-in to actively touch an external target
+    profile_is_auto: bool = True     # True if --profile auto (gate may prompt for external upgrade)
     events_path: str = ""            # NDJSON event log path (issue #25); "" = disabled
     seclists_dir: str = ""           # override SecLists root (else auto-detect / $CTFAUTO_SECLISTS)
     # --- cloud recon (unauthenticated public-misconfig discovery) -------------
