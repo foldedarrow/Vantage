@@ -85,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--peas-dir", default="", help="Dir holding linpeas.sh / winPEAS (default /usr/share/peass)")
     p.add_argument("--no-default-creds", action="store_true",
                    help="Skip default-credential checks (on by default)")
+    p.add_argument("--connect", "-sT", dest="connect_scan", action="store_true",
+                   help="Force an nmap TCP connect scan (-sT) instead of the default "
+                        "SYN scan. Use this when a SYN scan returns everything as "
+                        "'tcpwrapped' (common with some hypervisor NAT/virtual NICs). "
+                        "ctfauto also auto-falls-back to -sT when it detects this.")
     p.add_argument("--no-udp", action="store_true", help="Disable UDP scan even on lab profile")
     p.add_argument("--no-nse-vuln", action="store_true", help="Disable nmap --script vuln")
     p.add_argument("--hostname", default="", help="Force a hostname (e.g. box.htb) for HTTP/vhost enum")
@@ -341,6 +346,7 @@ def build_config(args) -> RunConfig:
         hostname=args.hostname,
         resume=args.resume,
         max_time=args.max_time,
+        connect_scan=args.connect_scan,
         no_udp=args.no_udp,
         no_nse_vuln=args.no_nse_vuln,
         default_creds=not args.no_default_creds,

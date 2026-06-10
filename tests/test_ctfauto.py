@@ -484,5 +484,90 @@ class TestBudget(unittest.TestCase):
         self.assertEqual(errs, "budget-exhausted")
 
 
+class TestTcpwrappedFallback(unittest.TestCase):
+    """The tcpwrapped detection that triggers the -sT connect re-scan."""
+    def test_mostly_tcpwrapped_true(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "tcpwrapped"), _svc(22, "tcpwrapped"),
+                      _svc(80, "tcpwrapped"), _svc(445, "netbios-ssn", product="Samba")]
+        self.assertTrue(R._mostly_tcpwrapped(h))
+
+    def test_healthy_scan_not_flagged(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "ftp", product="vsftpd", version="2.3.4"),
+                      _svc(22, "ssh", product="OpenSSH", version="4.7p1"),
+                      _svc(80, "http", product="Apache", version="2.2.8")]
+        self.assertFalse(R._mostly_tcpwrapped(h))
+
+    def test_single_service_not_flagged(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(80, "tcpwrapped")]
+        self.assertFalse(R._mostly_tcpwrapped(h))  # too small to be confident
+
+    def test_banner_count(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "ftp", product="vsftpd", version="2.3.4"),
+                      _svc(22, "tcpwrapped")]
+        self.assertEqual(R._banner_count(h), 1)
+
+
+class TestNSEGrouping(unittest.TestCase):
+    """NSE findings must group one-per-port, not one-per-line (the report
+    explosion bug)."""
+    def _host_with_nse(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "ftp"), _svc(80, "http")]
+        h.nse_by_port = {
+            "21": ["VULNERABLE:", "CVE:CVE-2011-2523"],
+            "80": ["CVE-2017-7679 9.8", "CVE-2011-3192 7.8"],
+        }
+        h.nse_vuln_hits = ["[:21] VULNERABLE:", "[:21] CVE:CVE-2011-2523",
+                           "[:80] CVE-2017-7679 9.8", "[:80] CVE-2011-3192 7.8"]
+        h.nse_cves = ["CVE-2011-2523", "CVE-2017-7679", "CVE-2011-3192"]
+        return h
+
+    def test_one_finding_per_port(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab())
+        # build an EnumResult via the grouping branch only (avoid live tools):
+        res = EN.EnumResult()
+        h = self._host_with_nse()
+        for port, lines in h.nse_by_port.items():
+            res.add(EN.EnumFinding(int(port), "nmap-nse",
+                                   f"{len(lines)} vuln-script line(s) on :{port}",
+                                   "\n".join(lines)))
+        nse_findings = [f for f in res.findings if f.tool == "nmap-nse"]
+        self.assertEqual(len(nse_findings), 2)  # not 4 lines
+        ports = {f.service_port for f in nse_findings}
+        self.assertEqual(ports, {21, 80})
+
+
+class TestCVEBridge(unittest.TestCase):
+    """NSE-flagged CVEs should fire the curated exploit even with an empty banner."""
+    def test_vsftpd_cve_fires_without_banner(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "tcpwrapped")]  # no banner!
+        h.nse_cves = ["CVE-2011-2523"]
+        cands = E._cve_bridge_candidates(h)
+        mods = [c.msf_module for c in cands]
+        self.assertIn("exploit/unix/ftp/vsftpd_234_backdoor", mods)
+
+    def test_unknown_cve_ignored(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "tcpwrapped")]
+        h.nse_cves = ["CVE-2099-0000"]
+        self.assertEqual(E._cve_bridge_candidates(h), [])
+
+    def test_bridge_deduped_against_signature(self):
+        # if both the banner AND the NSE CVE match, dedupe keeps exactly one run.
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "ftp", product="vsftpd", version="2.3.4")]
+        h.nse_cves = ["CVE-2011-2523"]
+        all_c = E._signature_candidates(h) + E._cve_bridge_candidates(h)
+        deduped = E._dedupe(all_c)
+        vsftpd = [c for c in deduped
+                  if c.msf_module == "exploit/unix/ftp/vsftpd_234_backdoor"]
+        self.assertEqual(len(vsftpd), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

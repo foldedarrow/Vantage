@@ -134,6 +134,7 @@ class RunConfig:
     hostname: str = ""               # resolved/added .htb name, if any
     resume: bool = False             # reuse cached phase state
     max_time: int = 0                # global wall-clock budget (s); 0 = unlimited (#17)
+    connect_scan: bool = False       # force nmap -sT connect scan (skip SYN scan)
     no_udp: bool = False             # force-disable UDP even on lab
     no_nse_vuln: bool = False        # force-disable --script vuln
     default_creds: bool = True       # try default credentials (safe, on by default)

@@ -31,7 +31,9 @@ class HostResult:
     os_guess: str = ""
     services: list[Service] = field(default_factory=list)
     udp_services: list[Service] = field(default_factory=list)
-    nse_vuln_hits: list[str] = field(default_factory=list)  # parsed vuln-script findings
+    nse_vuln_hits: list[str] = field(default_factory=list)  # flat parsed lines (compat)
+    nse_by_port: dict = field(default_factory=dict)         # port(str) -> [lines]
+    nse_cves: list[str] = field(default_factory=list)       # unique CVE IDs flagged
 
     @property
     def all_services(self) -> list[Service]:
@@ -108,12 +110,53 @@ def _host_from_state(d: dict) -> HostResult | None:
     try:
         host = HostResult(ip=r.get("ip", ""), hostname=r.get("hostname", ""),
                           os_guess=r.get("os_guess", ""),
-                          nse_vuln_hits=r.get("nse_vuln_hits", []))
+                          nse_vuln_hits=r.get("nse_vuln_hits", []),
+                          nse_by_port=r.get("nse_by_port", {}),
+                          nse_cves=r.get("nse_cves", []))
         host.services = [Service(**s) for s in r.get("services", [])]
         host.udp_services = [Service(**s) for s in r.get("udp_services", [])]
         return host
     except (TypeError, ValueError):
         return None
+
+
+def _banner_count(host: HostResult) -> int:
+    """How many services have a real version banner (not blank/tcpwrapped)."""
+    n = 0
+    for s in host.services:
+        if s.banner.strip() and s.name.lower() != "tcpwrapped":
+            n += 1
+    return n
+
+
+def _mostly_tcpwrapped(host: HostResult) -> bool:
+    """True when the scan found open ports but most carry no usable service
+    info — the 'tcpwrapped'/empty-banner pattern that a connect scan fixes.
+    Requires at least a couple of open ports so we don't over-trigger on a
+    genuinely tiny target."""
+    svcs = host.services
+    if len(svcs) < 2:
+        return False
+    wrapped = sum(1 for s in svcs
+                  if s.name.lower() == "tcpwrapped" or not s.banner.strip())
+    return wrapped >= max(2, int(0.7 * len(svcs)))
+
+
+def _rescan_connect(cfg: RunConfig, host: HostResult) -> HostResult | None:
+    """Targeted TCP connect re-scan (-sT -sV) of the already-discovered open
+    ports. Much faster than re-scanning all 65k ports, and connect scans aren't
+    affected by the SYN-mangling that produces tcpwrapped."""
+    ports = ",".join(str(s.port) for s in host.services)
+    if not ports:
+        return None
+    xml_out = os.path.join(cfg.out_dir, f"nmap_connect_{cfg.target.replace('/', '_')}.xml")
+    cmd = ["nmap", "-sT", "-sV", "--version-intensity", "9",
+           cfg.profile.nmap_timing, "-p", ports, "--open",
+           "-oX", xml_out, cfg.target]
+    rc, _, _ = run(cmd, timeout=900)
+    if not os.path.exists(xml_out):
+        return None
+    return parse_nmap_xml(xml_out)
 
 
 def scan(cfg: RunConfig) -> HostResult:
@@ -135,8 +178,11 @@ def scan(cfg: RunConfig) -> HostResult:
     # Full TCP scan when the profile allows it; top-ports on gentle to reduce
     # noise on shared infra. Keyed off the capability flag, not the name string.
     port_spec = ["-p-"] if cfg.profile.full_tcp else ["--top-ports", "1000"]
+    # -sT (connect) when forced; otherwise nmap's default (SYN scan as root).
+    scan_type = ["-sT"] if cfg.connect_scan else []
     cmd = [
         "nmap", cfg.profile.nmap_timing,
+        *scan_type,
         *cfg.profile.nmap_args.split(),
         *port_spec,
         "-oX", xml_out,
@@ -152,13 +198,36 @@ def scan(cfg: RunConfig) -> HostResult:
     if not host.services and rc != 0:
         warn(f"nmap exited rc={rc} with no parsed services; results may be incomplete.")
 
+    # tcpwrapped fallback: a SYN scan that comes back with mostly 'tcpwrapped'
+    # (no banners) is the classic signature of a hypervisor NAT / virtual-NIC
+    # mangling half-open connections. A TCP connect scan (-sT) sees through it.
+    # Re-scan the discovered ports with -sT -sV and keep whichever result is
+    # richer. Skipped if the user already forced -sT.
+    if not cfg.connect_scan and _mostly_tcpwrapped(host):
+        warn("scan returned mostly 'tcpwrapped' (no service banners) — this usually "
+             "means a SYN scan is being interfered with (hypervisor NAT/virtual NIC). "
+             "Re-scanning the open ports with a TCP connect scan (-sT)...")
+        better = _rescan_connect(cfg, host)
+        if better and _banner_count(better) > _banner_count(host):
+            good(f"connect-scan recovered {_banner_count(better)} service banner(s) "
+                 f"(was {_banner_count(host)}). Using connect-scan results.")
+            # preserve any ports the first scan saw but the targeted rescan didn't
+            known = {s.port for s in better.services}
+            for s in host.services:
+                if s.port not in known:
+                    better.services.append(s)
+            better.services.sort(key=lambda s: s.port)
+            host = better
+        else:
+            warn("connect-scan did not improve results; keeping original scan.")
+
     # UDP top-ports pass (lab profile, unless --no-udp). UDP is slow, so keep it small.
     if cfg.profile.udp_scan and not cfg.no_udp:
         host.udp_services = _udp_scan(cfg)
 
     # NSE vuln scripts against the open TCP ports we found.
     if cfg.profile.nse_vuln and not cfg.no_nse_vuln and host.services:
-        host.nse_vuln_hits = _nse_vuln_scan(cfg, host)
+        _nse_vuln_scan(cfg, host)
 
     # Persist recon so a later --resume can skip the (slow) scan (#13).
     try:
@@ -184,7 +253,12 @@ def _udp_scan(cfg: RunConfig) -> list[Service]:
     return udp_host.services
 
 
-def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> list[str]:
+def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> None:
+    """Run NSE vuln scripts and populate host.nse_by_port (grouped per port),
+    host.nse_vuln_hits (flat, for back-compat), and host.nse_cves (unique CVE
+    IDs). Previously every matched line became its own finding downstream, which
+    exploded the report into hundreds of ':0' entries — now they're grouped."""
+    import re as _re
     info("NSE vuln scripts (--script vuln + smb-vuln-*)")
     ports = ",".join(str(s.port) for s in host.services)
     out_path = os.path.join(cfg.out_dir, f"nmap_vuln_{cfg.target.replace('/', '_')}.txt")
@@ -192,22 +266,34 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> list[str]:
            "--script", "vuln,smb-vuln-*,ssl-enum-ciphers",
            "-oN", out_path, cfg.target]
     rc, out, _ = run(cmd, timeout=1800)
-    hits: list[str] = []
-    cur_port = ""
+
+    by_port: dict[str, list[str]] = {}
+    flat: list[str] = []
+    cves: list[str] = []
+    cve_re = _re.compile(r"CVE-\d{4}-\d{4,7}")
+    cur_port = "?"
     for line in out.splitlines():
         stripped = line.strip()
         if "/tcp" in line and "open" in line:
             cur_port = line.split("/")[0].strip()
-        # nmap marks confirmed vulns with "VULNERABLE" and CVE refs.
-        # Parenthesised explicitly (precedence was correct but fragile to read).
         if ("VULNERABLE" in stripped) or (
             stripped.startswith("|") and ("CVE-" in stripped or "State: VULNERABLE" in stripped)):
-            hits.append(f"[:{cur_port or '?'}] {stripped.lstrip('| ')}")
-    if hits:
-        good(f"NSE flagged {len(hits)} potential vuln line(s)")
-        for h in hits[:15]:
-            info(f"  {h}")
-    return hits
+            clean = stripped.lstrip("| ")
+            by_port.setdefault(cur_port, []).append(clean)
+            flat.append(f"[:{cur_port}] {clean}")
+            for cve in cve_re.findall(stripped):
+                if cve not in cves:
+                    cves.append(cve)
+
+    host.nse_by_port = by_port
+    host.nse_vuln_hits = flat
+    host.nse_cves = cves
+    if flat:
+        n_ports = len(by_port)
+        good(f"NSE flagged {len(flat)} vuln line(s) across {n_ports} port(s); "
+             f"{len(cves)} unique CVE(s)")
+        for port, lines in list(by_port.items())[:8]:
+            info(f"  :{port} — {len(lines)} line(s)")
 
 
 def _parse_host_el(host_el) -> HostResult:

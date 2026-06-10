@@ -147,9 +147,24 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
     for batch in batches:
         res.extend(batch)
 
-    # Surface NSE vuln hits from recon as enumeration findings too.
-    for hit in host.nse_vuln_hits:
-        res.add(EnumFinding(0, "nmap-nse", "vuln-script finding", hit))
+    # Surface NSE vuln hits from recon as enumeration findings — GROUPED one
+    # finding per port (previously one-per-line, which exploded the report).
+    nse_by_port = getattr(host, "nse_by_port", None)
+    if nse_by_port:
+        for port, lines in sorted(nse_by_port.items(),
+                                  key=lambda kv: (kv[0].isdigit(), int(kv[0]) if kv[0].isdigit() else 0)):
+            try:
+                pnum = int(port)
+            except (TypeError, ValueError):
+                pnum = 0
+            res.add(EnumFinding(pnum, "nmap-nse",
+                                f"{len(lines)} vuln-script line(s) on :{port}",
+                                "\n".join(lines)))
+    elif host.nse_vuln_hits:
+        # back-compat: flat list with no grouping info
+        res.add(EnumFinding(0, "nmap-nse",
+                            f"{len(host.nse_vuln_hits)} vuln-script line(s)",
+                            "\n".join(host.nse_vuln_hits)))
     return res
 
 

@@ -355,6 +355,30 @@ in the gitignored JSON/loot.
 
 ---
 
+## Field-test fixes (first live Metasploitable 2 run)
+
+The first real run surfaced bugs unit tests couldn't. All fixed, suite now
+**74 green**.
+
+- **tcpwrapped / SYN-scan interference** — a SYN scan through some hypervisor
+  NAT/virtual NICs returns every port as `tcpwrapped` with no banners, which
+  silently crippled the whole exploit phase (no signature matched). Fixed with
+  (a) a `--connect`/`-sT` flag to force a connect scan, and (b) automatic
+  fallback: when `recon._mostly_tcpwrapped` detects the pattern, ctfauto re-scans
+  the open ports with `-sT -sV --version-intensity 9` and keeps the richer
+  result. Tests: `TestTcpwrappedFallback`.
+- **NSE finding explosion** — every NSE vuln line became its own `:0` finding
+  (200+ entries, 49 KB report). NSE results are now grouped one-finding-per-port
+  (`recon.nse_by_port`), with unique CVEs collected into `recon.nse_cves`. Report
+  renders them grouped with a CVE summary. Tests: `TestNSEGrouping`.
+- **NSE CVE → exploit bridge** — when the banner is empty but NSE flags a known
+  CVE (e.g. CVE-2011-2523 = vsftpd backdoor), the curated exploit now fires
+  anyway via `exploit._cve_bridge_candidates`, deduped against the banner path.
+  This recovers exploitation even on a partially-blind scan. Tests:
+  `TestCVEBridge`.
+
+---
+
 ## Follow-up fixes (commit after `86fa0dc`)
 
 A second review pass closed the remaining items below. All covered by tests

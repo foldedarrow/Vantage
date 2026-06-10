@@ -155,8 +155,20 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
         L.append("_No open services found._")
     L.append("")
 
+    nse_by_port = getattr(host, "nse_by_port", None)
     nse = getattr(host, "nse_vuln_hits", [])
-    if nse:
+    if nse_by_port:
+        L.append("## NSE vuln-script findings\n")
+        cves = getattr(host, "nse_cves", []) or []
+        if cves:
+            L.append(f"**CVEs flagged:** {', '.join(cves)}\n")
+        for port in sorted(nse_by_port,
+                           key=lambda p: int(p) if p.isdigit() else 1 << 30):
+            lines = nse_by_port[port]
+            L.append(f"### :{port} — {len(lines)} line(s)")
+            L.append("```\n" + "\n".join(lines) + "\n```")
+        L.append("")
+    elif nse:
         L.append("## NSE vuln-script findings\n")
         L.append("```\n" + "\n".join(nse) + "\n```\n")
 
