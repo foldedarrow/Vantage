@@ -355,6 +355,41 @@ in the gitignored JSON/loot.
 
 ---
 
+## Follow-up fixes (commit after `86fa0dc`)
+
+A second review pass closed the remaining items below. All covered by tests
+(suite now **66 green**, up from 42).
+
+- **#13 (enum half) RESOLVED** — `--resume` now persists *and* reloads
+  enumeration findings (`enumerate._enum_to_state` / `_enum_from_state`), merged
+  into the same `state_*.json` as recon. A resumed run skips re-enumeration, not
+  just the nmap scan. Tests: `TestEnumResumeState`.
+- **#17 RESOLVED** — global wall-clock budget (`--max-time`,
+  `util.start_budget` / `budget_remaining` / `budget_exceeded`). `run()` clamps
+  each tool timeout to the remaining budget and returns rc=125 once spent; the
+  exploit phase downgrades to identify-only when the budget is exhausted. Calls
+  ≥60s emit a 30s heartbeat. Tests: `TestBudget`.
+- **#24 RESOLVED** — searchsploit is now version-aware: `_parse_version` +
+  `_version_applicable` filter/rank hits to the detected version, and
+  `_promote_candidate` auto-promotes strong, well-known matches (vsftpd 2.3.4,
+  Samba usermap, UnrealIRCd, distcc, ProFTPD 1.3.3c, php-cgi) into the gated MSF
+  flow, deduped against the curated signatures. Tests: `TestSearchsploitPromotion`.
+- **#31 (redaction) RESOLVED** — `report._redact` masks private keys, AWS keys,
+  `password`/`secret`/`token` k=v pairs, hydra success lines, and ctfauto's own
+  `VALID CREDS:` pairs in the *Markdown* report; raw data still lands in the
+  gitignored JSON/loot. HTB flags (32-hex) are deliberately preserved. Tests:
+  `TestRedaction`.
+- **Tomcat default-creds RESOLVED** — detected by banner (`_looks_like_tomcat`),
+  not a hardcoded 8080/8009 pair; AJP 8009 is correctly excluded; Manager check
+  uses https on TLS ports. Tests: `TestTomcatDetection`.
+- **CMS/sweep port drop RESOLVED** — `_web_candidates` preserves the discovered
+  service port (a CMS on :8080 is no longer scanned on :80). Tests:
+  `TestWebCandidatePort`.
+- **Polish** — NSE vuln-parser condition parenthesised; `MSFRPC_PASS` now warns
+  when left at the default.
+
+---
+
 ## Suggested order of work
 
 1. **Safety first (S1):** #1, #2, #3 — stop the tool from hitting public IPs with the lab

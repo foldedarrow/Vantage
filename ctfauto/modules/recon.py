@@ -198,9 +198,10 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> list[str]:
         stripped = line.strip()
         if "/tcp" in line and "open" in line:
             cur_port = line.split("/")[0].strip()
-        # nmap marks confirmed vulns with "VULNERABLE" and CVE refs
-        if "VULNERABLE" in stripped or stripped.startswith("|") and (
-            "CVE-" in stripped or "State: VULNERABLE" in stripped):
+        # nmap marks confirmed vulns with "VULNERABLE" and CVE refs.
+        # Parenthesised explicitly (precedence was correct but fragile to read).
+        if ("VULNERABLE" in stripped) or (
+            stripped.startswith("|") and ("CVE-" in stripped or "State: VULNERABLE" in stripped)):
             hits.append(f"[:{cur_port or '?'}] {stripped.lstrip('| ')}")
     if hits:
         good(f"NSE flagged {len(hits)} potential vuln line(s)")

@@ -106,12 +106,73 @@ def event(cfg, kind: str, **fields) -> None:
         pass
 
 
+# --- global wall-clock budget (issue #17) ------------------------------------
+# A single per-run deadline. When set, run() clamps each command's timeout to the
+# remaining budget and phases can check budget_exceeded() to stop early instead of
+# grinding for an unbounded total. 0/None = unlimited (back-compat default).
+_deadline: float | None = None
+
+
+def start_budget(seconds: float | None) -> None:
+    """Begin a wall-clock budget of `seconds` from now (None/<=0 disables)."""
+    global _deadline
+    _deadline = (time.time() + seconds) if seconds and seconds > 0 else None
+
+
+def budget_remaining() -> float | None:
+    """Seconds left in the budget, or None if no budget is set."""
+    if _deadline is None:
+        return None
+    return max(0.0, _deadline - time.time())
+
+
+def budget_exceeded() -> bool:
+    rem = budget_remaining()
+    return rem is not None and rem <= 0
+
+
+class _Heartbeat:
+    """Emit a 'still running (Ns)' line every `interval`s for a long call (#17)."""
+    def __init__(self, label: str, interval: float = 30.0):
+        self.label = label
+        self.interval = interval
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self):
+        waited = 0.0
+        while not self._stop.wait(self.interval):
+            waited += self.interval
+            info(f"  …still running {self.label} ({int(waited)}s)")
+
+    def __enter__(self):
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+
+
 def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, str, str]:
     """Run a command. Returns (returncode, stdout, stderr).
-    Never raises on non-zero exit; returns the captured output instead."""
+    Never raises on non-zero exit; returns the captured output instead.
+
+    Honours the global wall-clock budget (#17): the effective timeout is the
+    smaller of the requested timeout and the remaining budget, and a call that's
+    refused because the budget is spent returns rc=125 without executing."""
+    rem = budget_remaining()
+    if rem is not None:
+        if rem <= 0:
+            warn(f"global time budget exhausted — skipping: {cmd[0]}")
+            return 125, "", "budget-exhausted"
+        timeout = int(min(timeout, rem)) or 1
     info(f"exec: {C.GREY}{' '.join(cmd)}{C.RESET}")
     start = time.time()
+    # Heartbeat only for calls we expect could be long.
+    hb = _Heartbeat(cmd[0], interval=30.0) if timeout >= 60 else None
     try:
+        if hb:
+            hb.__enter__()
         proc = subprocess.run(
             cmd,
             capture_output=capture,
@@ -128,6 +189,9 @@ def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, 
     except subprocess.TimeoutExpired:
         warn(f"timed out after {timeout}s: {cmd[0]}")
         return 124, "", "timeout"
+    finally:
+        if hb:
+            hb.__exit__()
 
 
 def parallel_map(fn, items, workers: int = 4):

@@ -9,9 +9,11 @@ import os
 import re
 from dataclasses import dataclass, field
 
+from dataclasses import asdict
+
 from ..config import RunConfig
 from ..modules.recon import HostResult, Service
-from ..util import good, info, run, warn, warn_once, parallel_map
+from ..util import good, info, run, warn, warn_once, parallel_map, load_state, save_state
 from .. import wordlists
 
 
@@ -69,7 +71,54 @@ def _enum_tls(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                                    "\n".join(flags)[:2000]))
 
 
+def _enum_to_state(res: EnumResult) -> list[dict]:
+    return [asdict(f) for f in res.findings]
+
+
+def _enum_from_state(d: dict) -> EnumResult | None:
+    """Rebuild an EnumResult from cached state. Returns None if absent/invalid."""
+    rows = (d or {}).get("enum")
+    if rows is None:
+        return None
+    try:
+        res = EnumResult()
+        for r in rows:
+            res.findings.append(EnumFinding(
+                service_port=r.get("service_port", 0),
+                tool=r.get("tool", ""),
+                summary=r.get("summary", ""),
+                detail=r.get("detail", ""),
+                tags=r.get("tags", {}) or {},
+            ))
+        return res
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def enumerate_host(cfg: RunConfig, host: HostResult) -> EnumResult:
+    """Enumerate all services. With --resume, reuse cached enum findings if a
+    previous run persisted them (issue #13 — enum half was previously unwired)."""
+    if cfg.resume:
+        cached = _enum_from_state(load_state(cfg.out_dir, cfg.target))
+        if cached is not None and cached.findings:
+            good(f"--resume: reusing cached enumeration "
+                 f"({len(cached.findings)} finding(s)) from previous run")
+            return cached
+        info("--resume: no usable cached enumeration; enumerating fresh.")
+
+    res = _enumerate_host_fresh(cfg, host)
+
+    # Persist enum into the same state file as recon (merge, don't clobber #13).
+    try:
+        state = load_state(cfg.out_dir, cfg.target)
+        state["enum"] = _enum_to_state(res)
+        save_state(cfg.out_dir, cfg.target, state)
+    except OSError:
+        pass
+    return res
+
+
+def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
     res = EnumResult()
 
     def handle(svc: Service) -> list[EnumFinding]:

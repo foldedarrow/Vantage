@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +21,9 @@ from ctfauto.modules import exploit as E
 from ctfauto.modules import recon as R
 from ctfauto.modules import enumerate as EN
 from ctfauto.modules import cloud as CL
+from ctfauto.modules import report as RP
 from ctfauto import wordlists as W
+from ctfauto import util as U
 
 
 class TestClassification(unittest.TestCase):
@@ -322,6 +325,163 @@ class TestCloud(unittest.TestCase):
         ef = res.as_enum_findings()
         self.assertEqual(ef[0].tags["cloud"], "aws")
         self.assertEqual(ef[0].tags["cloud_state"], "listable")
+
+
+def _svc(port, name, product="", version=""):
+    return R.Service(port=port, proto="tcp", name=name, product=product, version=version)
+
+
+class TestTomcatDetection(unittest.TestCase):
+    """Tomcat default-cred candidate must key off the banner, not a hardcoded
+    port pair, and must not match AJP (8009)."""
+    def _cfg(self):
+        return RunConfig(target="10.0.0.1", profile=Profile.lab(), default_creds=True)
+
+    def test_tomcat_by_banner_on_nonstandard_port(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(8180, "http", product="Apache Tomcat/Coyote JSP engine", version="1.1")]
+        cands = E._default_cred_candidates(self._cfg(), h)
+        self.assertTrue(any("TOMCAT" in c.title for c in cands), [c.title for c in cands])
+
+    def test_ajp_8009_is_not_tomcat_cred(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(8009, "ajp13", product="Apache Jserv")]
+        cands = E._default_cred_candidates(self._cfg(), h)
+        self.assertFalse(any("TOMCAT" in c.title for c in cands))
+
+    def test_plain_http_8080_still_tomcat(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(8080, "http")]
+        cands = E._default_cred_candidates(self._cfg(), h)
+        self.assertTrue(any("TOMCAT" in c.title for c in cands))
+
+
+class TestWebCandidatePort(unittest.TestCase):
+    """CMS / sweep candidates must preserve the discovered port (not blind :80)."""
+    def _enum_with(self, finding):
+        er = EN.EnumResult()
+        er.findings.append(finding)
+        return er
+
+    def test_cms_url_keeps_port(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab())
+        f = EN.EnumFinding(8080, "cms", "CMS detected: wordpress", tags={"cms": "wordpress"})
+        cands = E._web_candidates(cfg, R.HostResult(ip="10.0.0.1"), self._enum_with(f))
+        cms = [c for c in cands if c.web_action == "cms"][0]
+        self.assertIn(":8080", cms.web_target)
+
+    def test_cms_url_uses_tag_url_when_present(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab())
+        f = EN.EnumFinding(8080, "cms", "CMS", tags={"cms": "drupal", "url": "http://h:9000"})
+        cands = E._web_candidates(cfg, R.HostResult(ip="10.0.0.1"), self._enum_with(f))
+        cms = [c for c in cands if c.web_action == "cms"][0]
+        self.assertIn(":9000", cms.web_target)
+
+
+class TestSearchsploitPromotion(unittest.TestCase):
+    def test_version_parse(self):
+        self.assertEqual(E._parse_version("vsftpd 2.3.4"), "2.3.4")
+        self.assertEqual(E._parse_version("Apache httpd 2.2.8 ((Ubuntu))"), "2.2.8")
+        self.assertEqual(E._parse_version("Samba smbd 3.0.20-Debian"), "3.0.20")
+        self.assertEqual(E._parse_version("no version here"), "")
+
+    def test_version_applicable_keeps_unconstrained(self):
+        self.assertTrue(E._version_applicable("vsftpd backdoor command execution", "2.3.4"))
+
+    def test_version_applicable_filters_mismatch(self):
+        self.assertFalse(E._version_applicable("vsftpd 3.0.3 something", "2.3.4"))
+
+    def test_version_applicable_matches(self):
+        self.assertTrue(E._version_applicable("vsftpd 2.3.4 backdoor", "2.3.4"))
+
+    def test_promote_vsftpd(self):
+        h = R.HostResult(ip="10.0.0.1")
+        s = _svc(21, "ftp", product="vsftpd", version="2.3.4")
+        promo = E._promote_candidate(h, s, "2.3.4", ["vsftpd 2.3.4 backdoor -> x"])
+        self.assertIsNotNone(promo)
+        self.assertEqual(promo.msf_module, "exploit/unix/ftp/vsftpd_234_backdoor")
+        self.assertTrue(promo.safe)
+
+    def test_no_promote_wrong_version(self):
+        h = R.HostResult(ip="10.0.0.1")
+        s = _svc(21, "ftp", product="vsftpd", version="3.0.3")
+        promo = E._promote_candidate(h, s, "3.0.3", ["vsftpd 3.0.3 -> x"])
+        self.assertIsNone(promo)
+
+
+class TestEnumResumeState(unittest.TestCase):
+    def test_enum_state_roundtrip(self):
+        er = EN.EnumResult()
+        er.findings.append(EN.EnumFinding(80, "whatweb", "fp", "detail", tags={"cms": "wp"}))
+        rows = EN._enum_to_state(er)
+        back = EN._enum_from_state({"enum": rows})
+        self.assertIsNotNone(back)
+        self.assertEqual(len(back.findings), 1)
+        self.assertEqual(back.findings[0].tags["cms"], "wp")
+
+    def test_enum_from_state_absent(self):
+        self.assertIsNone(EN._enum_from_state({"recon": {}}))
+
+
+class TestRedaction(unittest.TestCase):
+    def test_password_kv_redacted(self):
+        self.assertIn("[REDACTED]", RP._redact("password=hunter2"))
+        self.assertNotIn("hunter2", RP._redact("password: hunter2"))
+
+    def test_private_key_redacted(self):
+        blob = "-----BEGIN RSA PRIVATE KEY-----\nABCDEF\n-----END RSA PRIVATE KEY-----"
+        self.assertEqual(RP._redact(blob), "[REDACTED PRIVATE KEY]")
+
+    def test_hydra_line_redacted(self):
+        out = RP._redact("[22][ssh] host: 10.0.0.5   login: root   password: toor")
+        self.assertNotIn("toor", out)
+        self.assertIn("root", out)  # username preserved
+
+    def test_creds_list_masks_passwords(self):
+        out = RP._redact("VALID DEFAULT CREDS: root:root, admin:secret (manager)")
+        self.assertNotIn("secret", out)
+        self.assertIn("admin", out)
+        self.assertIn("(manager)", out)
+
+    def test_aws_key_redacted(self):
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE",
+                         RP._redact("key AKIAIOSFODNN7EXAMPLE found"))
+
+    def test_flag_hex_not_redacted(self):
+        flag = "a" * 32
+        self.assertIn(flag, RP._redact(f"cat user.txt -> {flag}"))
+
+    def test_benign_text_untouched(self):
+        txt = "Server: Apache/2.4.7 on 10.0.0.5:8080"
+        self.assertEqual(RP._redact(txt), txt)
+
+
+class TestBudget(unittest.TestCase):
+    def tearDown(self):
+        U.start_budget(None)  # reset global state between tests
+
+    def test_no_budget_means_unlimited(self):
+        U.start_budget(None)
+        self.assertIsNone(U.budget_remaining())
+        self.assertFalse(U.budget_exceeded())
+
+    def test_budget_counts_down(self):
+        U.start_budget(100)
+        rem = U.budget_remaining()
+        self.assertIsNotNone(rem)
+        self.assertTrue(0 < rem <= 100)
+        self.assertFalse(U.budget_exceeded())
+
+    def test_zero_budget_is_unlimited(self):
+        U.start_budget(0)
+        self.assertIsNone(U.budget_remaining())
+
+    def test_exhausted_budget_blocks_run(self):
+        U.start_budget(0.0001)
+        time.sleep(0.01)
+        rc, out, errs = U.run(["echo", "hi"])
+        self.assertEqual(rc, 125)
+        self.assertEqual(errs, "budget-exhausted")
 
 
 if __name__ == "__main__":

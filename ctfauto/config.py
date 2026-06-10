@@ -133,6 +133,7 @@ class RunConfig:
     discovered_tools: dict = field(default_factory=dict)
     hostname: str = ""               # resolved/added .htb name, if any
     resume: bool = False             # reuse cached phase state
+    max_time: int = 0                # global wall-clock budget (s); 0 = unlimited (#17)
     no_udp: bool = False             # force-disable UDP even on lab
     no_nse_vuln: bool = False        # force-disable --script vuln
     default_creds: bool = True       # try default credentials (safe, on by default)

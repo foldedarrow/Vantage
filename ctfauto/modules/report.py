@@ -12,6 +12,63 @@ from ..modules.enumerate import EnumResult
 from ..modules.exploit import ExploitResult
 from ..util import good
 
+import re as _re
+
+# Patterns for obvious secrets to mask in the *Markdown* report only. The raw,
+# unredacted data is still written to the gitignored JSON / loot files (#31).
+_REDACTORS = [
+    # private key blocks
+    (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+                 _re.S), "[REDACTED PRIVATE KEY]"),
+    # AWS access key IDs / secret access keys
+    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED AWS KEY ID]"),
+    (_re.compile(r"(?i)\baws_secret_access_key\b\s*[=:]\s*\S+"),
+     "aws_secret_access_key = [REDACTED]"),
+    # key: value style secrets (password/passwd/pwd/secret/token/api_key)
+    (_re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key)\b"
+                 r"\s*[=:]\s*('?\"?)([^\s'\"]{3,})\2"),
+     r"\1=[REDACTED]"),
+    # hydra/ctfauto success lines: 'login: x password: y'
+    (_re.compile(r"(?i)(login:\s*\S+\s+password:\s*)(\S+)"), r"\1[REDACTED]"),
+    # ctfauto's own 'VALID [DEFAULT ]CREDS: user:pass, user2:pass2' lines — mask
+    # the password half of each pair. Anchored on the CREDS: prefix so we don't
+    # touch unrelated 'host:port' / 'Server: Apache' text elsewhere.
+    (_re.compile(r"(?im)((?:VALID(?:\s+DEFAULT)?\s+CREDS|CREDS):\s*)(.+)$"),
+     lambda m: m.group(1) + _mask_cred_list(m.group(2))),
+]
+
+
+def _mask_cred_list(s: str) -> str:
+    """Given 'root:root, admin:secret (manager)', mask each password half."""
+    parts = []
+    for chunk in s.split(","):
+        c = chunk.strip()
+        if ":" in c:
+            user, _, rest = c.partition(":")
+            # keep any trailing parenthetical note (e.g. '(manager)')
+            tail = ""
+            if "(" in rest:
+                rest, _, paren = rest.partition("(")
+                tail = " (" + paren
+            parts.append(f"{user}:[REDACTED]{tail}".rstrip())
+        else:
+            parts.append(c)
+    return ", ".join(parts)
+
+
+def _redact(text: str) -> str:
+    """Mask obvious secrets for the human-readable Markdown. Raw data lives in
+    the JSON/loot files. Never raises — redaction must not break reporting."""
+    if not text:
+        return text
+    out = text
+    for rx, repl in _REDACTORS:
+        try:
+            out = rx.sub(repl, out)
+        except Exception:  # noqa: BLE001 — redaction must never break reporting
+            continue
+    return out
+
 
 def write_reports(cfg: RunConfig, host: HostResult,
                   enum: EnumResult, exploits: ExploitResult,
@@ -108,7 +165,7 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
         for fnd in enum.findings:
             L.append(f"### :{fnd.service_port} — {fnd.tool}: {fnd.summary}")
             if fnd.detail:
-                L.append("```\n" + fnd.detail.strip() + "\n```")
+                L.append("```\n" + _redact(fnd.detail.strip()) + "\n```")
             L.append("")
     else:
         L.append("_No enumeration findings._\n")
@@ -120,7 +177,8 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
         if wins:
             L.append("> **Confirmed access / valid findings:**")
             for c in wins:
-                L.append(f"> - :{c.port} {c.title} — {c.result.splitlines()[0]}")
+                first = _redact(c.result.splitlines()[0]) if c.result else ""
+                L.append(f"> - :{c.port} {c.title} — {first}")
             L.append("")
         for c in exploits.candidates:
             tag = "✅ SAFE" if c.safe else "⚠️ MANUAL/AGGRESSIVE"
@@ -133,9 +191,9 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
             if c.command:
                 L.append(f"- **Command:**\n```\n{c.command}\n```")
             if c.auto_ran:
-                L.append(f"- **Auto-run result:**\n```\n{c.result.strip()}\n```")
+                L.append(f"- **Auto-run result:**\n```\n{_redact(c.result.strip())}\n```")
             elif c.result:
-                L.append(f"- **Details:**\n```\n{c.result.strip()}\n```")
+                L.append(f"- **Details:**\n```\n{_redact(c.result.strip())}\n```")
             L.append("")
     else:
         L.append("_No exploit candidates identified._\n")
@@ -155,7 +213,7 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
         if proof:
             L.append("**Confirmed access (proof):**\n")
             for k, v in proof.items():
-                L.append(f"\n### {k} — proof\n```\n{v.strip()[:3000]}\n```")
+                L.append(f"\n### {k} — proof\n```\n{_redact(v.strip()[:3000])}\n```")
             L.append("")
         if postex.notes:
             L.append("**Notes:**\n")
@@ -163,7 +221,7 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
                 L.append(f"- {n}")
             L.append("")
         for k, v in (getattr(postex, "privesc_output", {}) or {}).items():
-            L.append(f"\n### {k} — enum output\n```\n{v.strip()[:3000]}\n```")
+            L.append(f"\n### {k} — enum output\n```\n{_redact(v.strip()[:3000])}\n```")
         L.append("")
 
     L.append("---")

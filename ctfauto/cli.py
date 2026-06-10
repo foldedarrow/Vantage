@@ -12,7 +12,10 @@ from .config import (
     Profile, RunConfig, classify_target, detect_tools, OWN_VPN_HINT_NETWORKS,
 )
 from .modules import recon, enumerate as enum_mod, exploit, report, postexploit
-from .util import banner, good, info, warn, err, C, events_init, event
+from .util import (
+    banner, good, info, warn, err, C, events_init, event,
+    start_budget, budget_exceeded,
+)
 
 
 # Install hints for the `--check` doctor (apt package per tool where it differs).
@@ -90,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--resume", action="store_true", help="Reuse cached recon/enum state if present")
     p.add_argument("-j", "--parallelism", type=int, default=0,
                    help="Override concurrent enumeration workers")
+    p.add_argument("--max-time", type=int, default=0,
+                   help="Global wall-clock budget in SECONDS for the whole run. "
+                        "0 = unlimited. When set, individual tool timeouts are "
+                        "clamped to the remaining budget and phases stop early "
+                        "once it's spent.")
     p.add_argument("--yes", action="store_true",
                    help="Skip the authorization prompt (lab/HTB only; external still "
                         "requires --allow-external)")
@@ -332,6 +340,7 @@ def build_config(args) -> RunConfig:
         discovered_tools=detect_tools(),
         hostname=args.hostname,
         resume=args.resume,
+        max_time=args.max_time,
         no_udp=args.no_udp,
         no_nse_vuln=args.no_nse_vuln,
         default_creds=not args.no_default_creds,
@@ -365,6 +374,11 @@ def main(argv=None) -> int:
         return 2
 
     cfg = build_config(args)
+
+    # Start the global wall-clock budget (#17). 0 = unlimited.
+    start_budget(cfg.max_time)
+    if cfg.max_time:
+        info(f"global time budget: {cfg.max_time}s for the whole run")
 
     banner(f"ctfauto {__version__}")
     missing = [t for t, path in cfg.discovered_tools.items() if not path]
@@ -434,6 +448,11 @@ def main(argv=None) -> int:
     event(cfg, "identify_done", candidates=len(exp_res.candidates))
 
     banner("PHASE 4 — EXPLOITATION")
+    if budget_exceeded():
+        warn("time budget exhausted before exploitation — skipping active phases. "
+             "Candidate commands are in the report.")
+        event(cfg, "budget_exhausted", phase="exploit")
+        cfg.identify_only = True  # downgrade to identify-only for the rest
     exploit.auto_exploit(cfg, host, exp_res)
     wins = [c for c in exp_res.candidates if c.session_opened]
     event(cfg, "exploit_done", confirmed=len(wins),
