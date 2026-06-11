@@ -67,17 +67,14 @@ class Profile:
     name: str
     nmap_timing: str          # -T2 (gentle) .. -T4 (lab)
     nmap_args: str
-    enable_brute: bool        # only with --aggressive
-    enable_auto_exploit: bool
     http_threads: int
-    max_brute_attempts: int
     udp_scan: bool            # run a UDP top-ports pass
     nse_vuln: bool            # run --script vuln (noisy)
     parallelism: int          # concurrent per-service enumeration workers
     # --- enumeration intensity (profile-aware noise control, issue #14) -------
     enable_nikto: bool = True       # nikto is loud; off on gentle/HTB
     enable_dirbust: bool = True     # gobuster/feroxbuster dir brute
-    enable_active_web: bool = True  # crawl->sqlmap/LFI active web stage
+    enable_active_web: bool = True  # active web crawl (param-URL discovery)
     full_tcp: bool = True           # -p- vs --top-ports on gentle
 
     @classmethod
@@ -86,10 +83,7 @@ class Profile:
             name="gentle (HTB / shared infra)",
             nmap_timing="-T2",
             nmap_args="-sV -sC --open",
-            enable_brute=False,
-            enable_auto_exploit=False,
             http_threads=10,
-            max_brute_attempts=0,
             udp_scan=False,        # UDP scans are slow + noisy on shared infra
             nse_vuln=False,
             parallelism=2,
@@ -105,10 +99,7 @@ class Profile:
             name="lab (owned VMs)",
             nmap_timing="-T4",
             nmap_args="-sV -sC -O --open",
-            enable_brute=False,        # flipped on by --aggressive
-            enable_auto_exploit=True,  # safe modules only unless --aggressive
             http_threads=40,
-            max_brute_attempts=200,
             udp_scan=True,
             nse_vuln=True,
             parallelism=6,
@@ -124,8 +115,6 @@ class RunConfig:
     target: str
     profile: Profile
     aggressive: bool = False
-    auto_exploit: bool = False
-    identify_only: bool = False
     out_dir: str = "loot"
     wordlist_dirs: str = ""          # gobuster wordlist
     wordlist_users: str = ""
@@ -137,9 +126,7 @@ class RunConfig:
     connect_scan: bool = False       # force nmap -sT connect scan (skip SYN scan)
     no_udp: bool = False             # force-disable UDP even on lab
     no_nse_vuln: bool = False        # force-disable --script vuln
-    default_creds: bool = True       # try default credentials (safe, on by default)
-    post_exploit: bool = False       # stage privesc enum over opened sessions
-    peas_dir: str = ""               # local dir holding linpeas.sh / winPEAS.exe
+    default_creds: bool = True       # flag known default-cred pairs in the report (identify-only)
     # --- scope / authorization (issues #1, #2, #4) ----------------------------
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
     allow_external: bool = False     # explicit opt-in to actively touch an external target
@@ -181,13 +168,13 @@ def classify_target(target: str) -> str:
 def detect_tools() -> dict:
     """Map of tool name -> path (or None if missing)."""
     tools = [
-        "nmap", "gobuster", "nikto", "hydra", "searchsploit",
-        "msfconsole", "msfrpcd", "enum4linux", "smbclient", "whatweb",
+        "nmap", "gobuster", "nikto", "searchsploit",
+        "enum4linux", "smbclient", "whatweb",
         "ffuf", "curl", "wget",
-        # new recon/enum tooling
+        # recon/enum tooling
         "onesixtyone", "snmpwalk", "snmp-check", "sslscan",
-        "wpscan", "droopescan", "sqlmap", "mount", "showmount",
-        "mysql", "git-dumper", "feroxbuster", "arjun",
+        "wpscan", "droopescan", "mount", "showmount",
+        "feroxbuster", "arjun",
         # cloud recon (unauthenticated misconfig discovery)
         "aws", "s3scanner", "cloud_enum",
     ]

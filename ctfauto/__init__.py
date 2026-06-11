@@ -1,2 +1,2 @@
-"""ctfauto — automated recon/enum/exploit-ID orchestrator for owned & authorized targets."""
+"""ctfauto — automated recon & enumeration with a report for owned & authorized targets (identifies candidate exploits but never runs them)."""
 __version__ = "0.1.0"

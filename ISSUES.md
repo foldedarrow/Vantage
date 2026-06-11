@@ -355,6 +355,46 @@ in the gitignored JSON/loot.
 
 ---
 
+## Field-test fixes — run 4 (root cause: operator's global setg PAYLOAD)
+
+Manual `msfconsole` repro nailed it: the operator's MSF has a GLOBAL default
+payload (`setg PAYLOAD cmd/linux/http/x86/meterpreter_reverse_tcp`) that overrides
+each module's default and aborts on missing LHOST — even outside ctfauto. Also
+confirmed `6200/tcp closed`, so there was never a stale backdoor; the exploit just
+never attached because of the bad payload. Suite **97 green**.
+
+- **`unset PAYLOAD` + forced verified payload** — `_msf_command` now clears any
+  inherited global payload, then forces the module's correct one:
+  `cmd/unix/interact` for vsftpd (the ONLY valid payload, verified via
+  `show payloads`), `cmd/unix/bind_perl` for samba/distcc/irc. Bind/interact need
+  no LHOST so it's no longer set for them. Longer post-`run` wait (`sleep 8`) plus
+  `sessions -l` so a slow-attaching session is captured. Tests: `TestMsfCommand`.
+- Note: run 3 wrongly mapped vsftpd to "no payload (use default)" — that's what let
+  the global setg take over. Always force the payload; never trust the env default.
+
+---
+
+## Field-test fixes — run 3 (payload names + stale backdoor)
+
+Run 2's LHOST fix half-worked: LHOST now sets correctly, but the *payload names*
+I'd guessed (`cmd/unix/interact`, `cmd/unix/bind_netcat`) were rejected by MSF
+("PAYLOAD is not valid"), so it fell back to a reverse payload. Verified against
+the actual MSF modules and corrected. Suite **97 green**.
+
+- **Verified payload names** — `_MODULE_PAYLOADS` now uses `cmd/unix/bind_perl`
+  (verified valid) for Samba/distcc/UnrealIRCd, and maps vsftpd to **None** (the
+  module manages its own tcp/6200 shell and errors if a payload is forced). LHOST
+  is still set when known. Tests: `TestMsfCommand`.
+- **Stale-backdoor detection** — when an exploit clearly FIRED but MSF didn't
+  attach (`Backdoor has been spawned!` / `port … already open` — a 6200 listener
+  left from a prior run), `_msf_likely_win_note` now surfaces it as a LIKELY WIN
+  with follow-up (`nc <ip> 6200`, or reboot the target to reset) instead of a flat
+  "no session". Tests: `TestMsfLikelyWin`.
+  - Operator note: on the live target, a prior run had already left vsftpd's 6200
+    shell open — `nc 192.168.8.104 6200` likely drops a root shell directly.
+
+---
+
 ## Field-test fixes — run 2 (Metasploitable 2, bridged network)
 
 Second live run (network now bridged, recon perfect — full 30-port fingerprint).

@@ -11,10 +11,10 @@ from . import __version__
 from .config import (
     Profile, RunConfig, classify_target, detect_tools, OWN_VPN_HINT_NETWORKS,
 )
-from .modules import recon, enumerate as enum_mod, exploit, report, postexploit
+from .modules import recon, enumerate as enum_mod, exploit, report
 from .util import (
     banner, good, info, warn, err, C, events_init, event,
-    start_budget, budget_exceeded,
+    start_budget,
 )
 
 
@@ -24,10 +24,7 @@ _INSTALL_HINTS = {
     "gobuster": "apt install gobuster",
     "feroxbuster": "apt install feroxbuster",
     "nikto": "apt install nikto",
-    "hydra": "apt install hydra",
     "searchsploit": "apt install exploitdb",
-    "msfconsole": "apt install metasploit-framework",
-    "msfrpcd": "apt install metasploit-framework",
     "enum4linux": "apt install enum4linux",
     "smbclient": "apt install smbclient",
     "whatweb": "apt install whatweb",
@@ -38,9 +35,6 @@ _INSTALL_HINTS = {
     "sslscan": "apt install sslscan",
     "wpscan": "gem install wpscan   # or: apt install wpscan",
     "droopescan": "pipx install droopescan",
-    "sqlmap": "apt install sqlmap",
-    "git-dumper": "pipx install git-dumper",
-    "mysql": "apt install default-mysql-client",
     "showmount": "apt install nfs-common",
     "arjun": "pipx install arjun",
     # cloud recon (all optional — module has a stdlib HTTP fallback)
@@ -53,27 +47,25 @@ _INSTALL_HINTS = {
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ctfauto",
-        description="Automated recon/enum/exploit-ID for owned & authorized targets "
-                    "(HTB, Metasploitable, lab VMs).",
+        description="Automated recon & enumeration for owned & authorized targets "
+                    "(HTB, Metasploitable, lab VMs). Produces a report — it never "
+                    "exploits anything.",
         epilog="Only use against systems you own or are explicitly authorized to test.",
     )
     p.add_argument("target", nargs="?", help="Target IP or hostname")
     p.add_argument("-o", "--out-dir", default="loot", help="Output directory (default: loot/)")
     p.add_argument("--profile", choices=["auto", "lab", "gentle"], default="auto",
                    help="auto = pick based on target IP (HTB->gentle, RFC1918->lab)")
-    p.add_argument("--auto-exploit", action="store_true",
-                   help="Fire SAFE (non-destructive) exploit modules automatically")
     p.add_argument("--aggressive", action="store_true",
-                   help="Enable brute-force + all matched modules. Noisy. Lab only.")
+                   help="Enable the loudest, most thorough enumeration (full TCP, "
+                        "nikto, NSE vuln scripts, active web crawl). Noisy. Lab only.")
     p.add_argument("--allow-external", action="store_true",
-                   help="Explicitly authorize ACTIVE testing of a target outside known "
+                   help="Explicitly authorize ACTIVE recon of a target outside known "
                         "lab/HTB ranges (a public/unknown IP). Required before ctfauto "
-                        "will scan or exploit such a target — you are asserting you have "
-                        "written permission. On --profile auto you'll be prompted to "
-                        "choose the gentle or full lab profile; pass --profile lab (or "
-                        "--aggressive) to opt into aggressive automation directly.")
-    p.add_argument("--identify-only", action="store_true",
-                   help="Recon + enum + list exploits, but never fire anything")
+                        "will scan such a target — you are asserting you have written "
+                        "permission. On --profile auto you'll be prompted to choose the "
+                        "gentle or full lab profile; pass --profile lab to opt into the "
+                        "loud profile directly.")
     p.add_argument("--check", "--doctor", dest="check", action="store_true",
                    help="Print the tool/dependency matrix and install hints, then exit")
     p.add_argument("--wordlist-dirs", default="", help="gobuster/feroxbuster wordlist path")
@@ -82,11 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seclists-dir", default="",
                    help="SecLists root (else auto-detect common locations / "
                         "$CTFAUTO_SECLISTS). e.g. /usr/share/seclists")
-    p.add_argument("--post-exploit", action="store_true",
-                   help="Stage privesc enumeration (linpeas/winPEAS) over opened sessions")
-    p.add_argument("--peas-dir", default="", help="Dir holding linpeas.sh / winPEAS (default /usr/share/peass)")
     p.add_argument("--no-default-creds", action="store_true",
-                   help="Skip default-credential checks (on by default)")
+                   help="Skip flagging known default-credential pairs in the report "
+                        "(on by default; this only identifies them, never tries them)")
     p.add_argument("--connect", "-sT", dest="connect_scan", action="store_true",
                    help="Force an nmap TCP connect scan (-sT) instead of the default "
                         "SYN scan. Use this when a SYN scan returns everything as "
@@ -146,11 +136,6 @@ def run_doctor(args=None) -> int:
     print()
     if "nmap" not in [t for t, p in tools.items() if p]:
         err("nmap is the one hard requirement and is missing — recon won't run.")
-    try:
-        import pymetasploit3  # noqa: F401
-        good("pymetasploit3 present (msfrpc post-exploit available)")
-    except ImportError:
-        warn("pymetasploit3 missing — `pip install pymetasploit3` for msfrpc post-exploit")
     if missing:
         warn(f"{len(missing)} tool(s) missing; their steps will be skipped.")
     else:
@@ -225,13 +210,14 @@ def _prompt_external_profile(cfg: RunConfig) -> None:
     'lab' profile (full aggressive automation) or stay on 'gentle'. Mutates
     cfg.profile in place. Defaults to gentle on empty/EOF (the safe choice)."""
     print(f"\n{C.YELLOW}This external target is on the GENTLE profile by default "
-          f"(quieter recon-led pass, no auto-exploit).{C.RESET}")
-    print("The LAB profile is full aggressive automation: -p- -T4, nikto, "
-          "dir-busting, NSE vuln scripts, and auto-exploitation. It is LOUD and "
-          "can lock accounts or crash services — only choose it if your written "
-          "authorization covers that level of intrusiveness.")
+          f"(quieter recon-led pass).{C.RESET}")
+    print("The LAB profile is full-intensity enumeration: -p- -T4, nikto, "
+          "dir-busting, NSE vuln scripts, and an active web crawl. It is LOUD and "
+          "can crash fragile services — only choose it if your written "
+          "authorization covers that level of intrusiveness. (ctfauto never "
+          "exploits anything on either profile.)")
     try:
-        ans = input(f"{C.YELLOW}Use the full LAB (aggressive) profile for "
+        ans = input(f"{C.YELLOW}Use the full LAB (loud enumeration) profile for "
                     f"{cfg.target}? [y/N]: {C.RESET}")
     except (EOFError, KeyboardInterrupt):
         ans = ""
@@ -254,8 +240,8 @@ def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -
     banner("AUTHORIZATION CHECK")
     print(f"Target:       {C.BOLD}{cfg.target}{C.RESET}  (classified: {klass})")
     print(f"Profile:      {cfg.profile.name}")
-    print(f"Auto-exploit: {cfg.auto_exploit}   Aggressive: {cfg.aggressive}   "
-          f"Identify-only: {cfg.identify_only}")
+    print(f"Mode:         recon + enumeration + report (no exploitation)   "
+          f"Aggressive: {cfg.aggressive}")
 
     if _is_own_vpn_ip(cfg.target):
         err("That looks like YOUR OWN VPN client IP (tun0 handout range), not a target. "
@@ -267,12 +253,12 @@ def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -
              "mass scanning; forcing the gentle profile and ignoring --aggressive.")
     if klass == "external":
         warn("Target is OUTSIDE known lab/HTB ranges (a public or unknown IP).")
-        # NOTE: even --identify-only runs active recon+enum (nmap, dir brute,
-        # whatweb) against the target — it only suppresses *exploitation*. So any
-        # run against an external target requires explicit authorization.
+        # NOTE: recon + enumeration (nmap, dir brute, whatweb, NSE) sends real,
+        # active scan traffic at the target. So any run against an external target
+        # requires explicit authorization, even though we never exploit anything.
         if not allow_external:
-            err("Refusing to scan an external target without --allow-external. Even "
-                "--identify-only sends real scan traffic. Re-run with --allow-external "
+            err("Refusing to scan an external target without --allow-external. "
+                "Recon/enum sends real scan traffic. Re-run with --allow-external "
                 "ONLY if you have explicit written authorization.")
             return False
         warn("--allow-external supplied: you are asserting written authorization for "
@@ -379,8 +365,6 @@ def build_config(args) -> RunConfig:
         target=target,
         profile=profile,
         aggressive=aggressive,
-        auto_exploit=args.auto_exploit,
-        identify_only=args.identify_only,
         out_dir=args.out_dir,
         wordlist_dirs=args.wordlist_dirs,
         wordlist_users=args.wordlist_users,
@@ -393,8 +377,6 @@ def build_config(args) -> RunConfig:
         no_udp=args.no_udp,
         no_nse_vuln=args.no_nse_vuln,
         default_creds=not args.no_default_creds,
-        post_exploit=args.post_exploit,
-        peas_dir=args.peas_dir,
         seclists_dir=args.seclists_dir,
         klass=klass,
         allow_external=args.allow_external,
@@ -444,8 +426,8 @@ def main(argv=None) -> int:
                                    f"events_{cfg.target.replace('/', '_')}.ndjson")
     events_init(cfg.events_path)
     event(cfg, "run_start", target=cfg.target, klass=cfg.klass,
-          profile=cfg.profile.name, auto_exploit=cfg.auto_exploit,
-          aggressive=cfg.aggressive, identify_only=cfg.identify_only)
+          profile=cfg.profile.name, mode="recon+enum+report",
+          aggressive=cfg.aggressive)
 
     # Cloud-only mode: --cloud without a need to host-scan. If the seed is a bare
     # keyword (not a scannable host), we skip the host pipeline entirely and just
@@ -495,23 +477,13 @@ def main(argv=None) -> int:
     enum_res = enum_mod.enumerate_host(cfg, host)
     event(cfg, "enum_done", findings=len(enum_res.findings))
 
-    banner("PHASE 3 — EXPLOIT IDENTIFICATION")
+    banner("PHASE 3 — EXPLOIT IDENTIFICATION (report-only)")
+    # ctfauto is a recon/enumeration tool: it IDENTIFIES candidate exploits and
+    # known CVEs for the report, but never fires anything. The candidate list is
+    # informational — use it as a starting point for manual, authorized testing.
     exp_res = exploit.identify(cfg, host, enum_res)
+    exp_res.candidates = exploit.dedupe(exp_res.candidates)
     event(cfg, "identify_done", candidates=len(exp_res.candidates))
-
-    banner("PHASE 4 — EXPLOITATION")
-    if budget_exceeded():
-        warn("time budget exhausted before exploitation — skipping active phases. "
-             "Candidate commands are in the report.")
-        event(cfg, "budget_exhausted", phase="exploit")
-        cfg.identify_only = True  # downgrade to identify-only for the rest
-    exploit.auto_exploit(cfg, host, exp_res)
-    wins = [c for c in exp_res.candidates if c.session_opened]
-    event(cfg, "exploit_done", confirmed=len(wins),
-          titles=[c.title for c in wins])
-
-    banner("PHASE 5 — POST-EXPLOITATION")
-    postex_res = postexploit.run_postexploit(cfg, host, exp_res)
 
     # Optional cloud recon alongside the host run. Harvests bucket names from the
     # web-enum crawl, then probes them (+ seed permutations) behind its own gate.
@@ -524,12 +496,13 @@ def main(argv=None) -> int:
         else:
             warn("cloud recon skipped: authorization not confirmed.")
 
-    banner("PHASE 6 — REPORT")
-    md, js = report.write_reports(cfg, host, enum_res, exp_res, postex_res)
+    banner("PHASE 4 — REPORT")
+    md, js = report.write_reports(cfg, host, enum_res, exp_res)
     event(cfg, "run_done", report=md)
     good(f"Done. Open {md} for the readable report.")
-    if wins:
-        good(f"{len(wins)} confirmed win(s): " + ", ".join(c.title for c in wins))
+    if exp_res.candidates:
+        good(f"{len(exp_res.candidates)} candidate exploit(s) listed in the report "
+             "for manual, authorized follow-up.")
     return 0
 
 

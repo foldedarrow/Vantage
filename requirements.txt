@@ -1,5 +1,5 @@
-# ctfauto core is stdlib-only — nothing required to run the pipeline.
+# ctfauto is stdlib-only — nothing is required to run the pipeline.
 #
-# Optional: drive Metasploit's RPC API for the post-exploitation stage.
-#   pip install -r requirements.txt
-pymetasploit3>=1.0
+# The recon/enum tooling (nmap, gobuster, nikto, searchsploit, ...) are system
+# packages installed via setup.sh, not pip dependencies. Run `ctfauto --check`
+# to see what's present.

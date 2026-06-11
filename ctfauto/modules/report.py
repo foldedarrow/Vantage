@@ -71,8 +71,7 @@ def _redact(text: str) -> str:
 
 
 def write_reports(cfg: RunConfig, host: HostResult,
-                  enum: EnumResult, exploits: ExploitResult,
-                  postex=None) -> tuple[str, str]:
+                  enum: EnumResult, exploits: ExploitResult) -> tuple[str, str]:
     os.makedirs(cfg.out_dir, exist_ok=True)
     safe_t = cfg.target.replace("/", "_")
     json_path = os.path.join(cfg.out_dir, f"report_{safe_t}.json")
@@ -86,23 +85,22 @@ def write_reports(cfg: RunConfig, host: HostResult,
         "aggressive": cfg.aggressive,
         "host": asdict(host),
         "enumeration": [asdict(f) for f in enum.findings],
-        "exploits": [asdict(c) for c in exploits.candidates],
-        "postexploit": (asdict(postex) if postex else {}),
+        "exploit_candidates": [asdict(c) for c in exploits.candidates],
     }
     with open(json_path, "w") as f:
         json.dump(data, f, indent=2)
 
     with open(md_path, "w") as f:
-        f.write(_render_md(cfg, host, enum, exploits, postex))
+        f.write(_render_md(cfg, host, enum, exploits))
 
     good(f"report written: {md_path}")
     good(f"json written:   {json_path}")
     return md_path, json_path
 
 
-def _render_md(cfg, host, enum, exploits, postex=None) -> str:
+def _render_md(cfg, host, enum, exploits) -> str:
     L = []
-    L.append(f"# ctfauto report — {cfg.target}\n")
+    L.append(f"# ctfauto recon report — {cfg.target}\n")
     L.append(f"- **Generated:** {datetime.now().isoformat(timespec='seconds')}")
     if cfg.hostname:
         L.append(f"- **Hostname:** {cfg.hostname}")
@@ -112,13 +110,12 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
     if host.os_guess:
         L.append(f"- **OS guess:** {host.os_guess}")
     L.append("")
-    # Captured flags float to the very top — the headline result on HTB.
-    flags = list(getattr(postex, "flags", []) or [])
-    if flags:
-        L.append("> 🚩 **Flags captured:** " + ", ".join(f"`{f}`" for f in flags))
-        L.append("")
-    L.append("> ⚠️ _Loot under the output dir (`gitloot/`, `sqlmap/`, raw scans) may "
-             "contain credentials or PII. Handle accordingly._")
+    L.append("> ℹ️ _This is a recon & enumeration report. ctfauto does not exploit "
+             "anything — the exploit candidates below are informational and intended "
+             "as a starting point for manual, authorized testing._")
+    L.append("")
+    L.append("> ⚠️ _Loot under the output dir (raw scans, dumps) may contain "
+             "credentials or PII. Handle accordingly._")
     L.append("")
 
     # Cloud misconfiguration findings (if the cloud phase ran) — surfaced up top.
@@ -182,61 +179,28 @@ def _render_md(cfg, host, enum, exploits, postex=None) -> str:
     else:
         L.append("_No enumeration findings._\n")
 
-    L.append("## Exploit candidates\n")
+    L.append("## Exploit candidates (informational — not run)\n")
     if exploits.candidates:
-        # Surface confirmed wins first.
-        wins = [c for c in exploits.candidates if c.session_opened]
-        if wins:
-            L.append("> **Confirmed access / valid findings:**")
-            for c in wins:
-                first = _redact(c.result.splitlines()[0]) if c.result else ""
-                L.append(f"> - :{c.port} {c.title} — {first}")
-            L.append("")
+        L.append("_ctfauto identified the following candidate exploits / known CVEs "
+                 "from the recon data. It did **not** attempt any of them. Use these "
+                 "as leads for manual, authorized testing._\n")
         for c in exploits.candidates:
-            tag = "✅ SAFE" if c.safe else "⚠️ MANUAL/AGGRESSIVE"
+            tag = "low-risk lead" if c.safe else "manual / higher-risk"
             cat = f" _[{c.category}]_" if getattr(c, "category", "") else ""
-            win = " 🎯" if c.session_opened else ""
-            L.append(f"### :{c.port} — {c.title}  ({tag}){cat}{win}")
+            L.append(f"### :{c.port} — {c.title}  ({tag}){cat}")
             L.append(f"{c.technique}\n")
             if c.msf_module:
-                L.append(f"- **Metasploit:** `{c.msf_module}`")
+                L.append(f"- **Metasploit module:** `{c.msf_module}`")
             if c.command:
-                L.append(f"- **Command:**\n```\n{c.command}\n```")
-            if c.auto_ran:
-                L.append(f"- **Auto-run result:**\n```\n{_redact(c.result.strip())}\n```")
-            elif c.result:
+                L.append(f"- **Suggested command:**\n```\n{c.command}\n```")
+            if c.result:
                 L.append(f"- **Details:**\n```\n{_redact(c.result.strip())}\n```")
             L.append("")
     else:
         L.append("_No exploit candidates identified._\n")
 
-    has_postex = postex and (postex.notes or getattr(postex, "privesc_output", None)
-                             or getattr(postex, "proof", None)
-                             or getattr(postex, "privesc_leads", None))
-    if has_postex:
-        L.append("## Post-exploitation\n")
-        leads = getattr(postex, "privesc_leads", []) or []
-        if leads:
-            L.append("**Privilege-escalation leads:**\n")
-            for lead in leads:
-                L.append(f"- {lead}")
-            L.append("")
-        proof = getattr(postex, "proof", {}) or {}
-        if proof:
-            L.append("**Confirmed access (proof):**\n")
-            for k, v in proof.items():
-                L.append(f"\n### {k} — proof\n```\n{_redact(v.strip()[:3000])}\n```")
-            L.append("")
-        if postex.notes:
-            L.append("**Notes:**\n")
-            for n in postex.notes:
-                L.append(f"- {n}")
-            L.append("")
-        for k, v in (getattr(postex, "privesc_output", {}) or {}).items():
-            L.append(f"\n### {k} — enum output\n```\n{_redact(v.strip()[:3000])}\n```")
-        L.append("")
-
     L.append("---")
-    L.append("_Generated by ctfauto. Use only against systems you own or are "
-             "explicitly authorized to test._")
+    L.append("_Generated by ctfauto — a recon & enumeration tool. It does not exploit "
+             "anything. Use only against systems you own or are explicitly authorized "
+             "to test._")
     return "\n".join(L) + "\n"

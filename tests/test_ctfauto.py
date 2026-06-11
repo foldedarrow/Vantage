@@ -53,14 +53,12 @@ class TestProfileFlags(unittest.TestCase):
         self.assertFalse(g.enable_nikto)
         self.assertFalse(g.enable_active_web)
         self.assertFalse(g.full_tcp)
-        self.assertFalse(g.enable_auto_exploit)
 
     def test_lab_enables_full_behaviour(self):
         lab = Profile.lab()
         self.assertTrue(lab.enable_nikto)
         self.assertTrue(lab.enable_active_web)
         self.assertTrue(lab.full_tcp)
-        self.assertTrue(lab.enable_auto_exploit)
 
 
 class TestDedupe(unittest.TestCase):
@@ -82,29 +80,6 @@ class TestDedupe(unittest.TestCase):
         s1 = E.ExploitCandidate(80, "EDB a", "x", safe=False, category="service")
         s2 = E.ExploitCandidate(80, "EDB b", "x", safe=False, category="service")
         self.assertEqual(len(E._dedupe([s1, s2])), 2)
-
-
-class TestDetectionStrings(unittest.TestCase):
-    def test_sqlmap_positive(self):
-        out = ("sqlmap identified the following injection point(s) ...\n"
-               "Parameter: id (GET)\n    Type: boolean-based blind\n    Title: x")
-        self.assertTrue(E._sqlmap_confirmed(out))
-
-    def test_sqlmap_negative_not_flagged(self):
-        self.assertFalse(E._sqlmap_confirmed(
-            "all tested parameters do not appear to be injectable"))
-
-    def test_hydra_success_parsed(self):
-        out = "[22][ssh] host: 10.0.0.5   login: msfadmin   password: msfadmin"
-        self.assertEqual(E._parse_hydra_hits(out), ["msfadmin:msfadmin"])
-
-    def test_hydra_banner_not_false_positive(self):
-        out = "[DATA] attacking ssh://x\nlogin: and password: appear in this banner line"
-        self.assertEqual(E._parse_hydra_hits(out), [])
-
-    def test_msf_session_2_detected(self):
-        self.assertTrue(E._msf_session_opened("[*] Command shell session 2 opened"))
-        self.assertFalse(E._msf_session_opened("[-] exploit completed, no session"))
 
 
 class TestReconXML(unittest.TestCase):
@@ -214,16 +189,6 @@ class TestWordlists(unittest.TestCase):
         # No SecLists, no system wordlists in the test env => '' for vhost.
         cfg = self._cfg(seclists_dir="/definitely/not/here")
         self.assertEqual(W.vhost_wordlist(cfg), "")
-
-    def test_lfi_payloads_merge_capped(self):
-        # Write 200 payloads; _lfi_payloads must cap the merged list at 60.
-        lfi = os.path.join(self.tmp, "Fuzzing/LFI/LFI-Jhaddix.txt")
-        with open(lfi, "w") as f:
-            f.write("\n".join(f"../etc/passwd{i}" for i in range(200)))
-        cfg = self._cfg(seclists_dir=self.tmp)
-        payloads = E._lfi_payloads(cfg)
-        self.assertLessEqual(len(payloads), 60)
-        self.assertGreater(len(payloads), len(E._LFI_PAYLOADS))
 
 
 class TestCloud(unittest.TestCase):
@@ -576,7 +541,7 @@ class TestExternalProfilePrompt(unittest.TestCase):
 
     def _cfg(self, *extra):
         args = self._CLI.build_parser().parse_args(
-            ["203.0.113.5", "--allow-external", "--auto-exploit", *extra])
+            ["203.0.113.5", "--allow-external", *extra])
         return self._CLI.build_config(args)
 
     def test_external_starts_gentle_on_auto(self):
@@ -626,33 +591,6 @@ class TestExternalProfilePrompt(unittest.TestCase):
         self.assertFalse(cfg.aggressive)
 
 
-class TestMsfCommand(unittest.TestCase):
-    """LHOST / payload selection — the missing-LHOST abort that failed every
-    backdoor on the first live run."""
-    def test_known_module_uses_bind_payload(self):
-        cmd = E._msf_command("exploit/multi/samba/usermap_script", "10.0.0.5", "10.0.0.9")
-        self.assertIn("set PAYLOAD cmd/unix/bind_netcat", cmd)
-        self.assertIn("set RHOSTS 10.0.0.5", cmd)
-
-    def test_vsftpd_uses_interact_payload(self):
-        cmd = E._msf_command("exploit/unix/ftp/vsftpd_234_backdoor", "10.0.0.5", "10.0.0.9")
-        self.assertIn("cmd/unix/interact", cmd)
-
-    def test_unknown_module_sets_lhost(self):
-        cmd = E._msf_command("exploit/some/unknown_module", "10.0.0.5", "10.0.0.9")
-        self.assertIn("set LHOST 10.0.0.9", cmd)
-
-    def test_lhost_set_when_available(self):
-        # even bind-payload modules get LHOST set (harmless, some modules ref it)
-        cmd = E._msf_command("exploit/multi/samba/usermap_script", "10.0.0.5", "10.0.0.9")
-        self.assertIn("set LHOST 10.0.0.9", cmd)
-
-    def test_local_ip_for_returns_something_or_empty(self):
-        # don't assert a specific IP (env-dependent); just that it's a str
-        ip = U.local_ip_for("10.0.0.5")
-        self.assertIsInstance(ip, str)
-
-
 class TestParamUrlScope(unittest.TestCase):
     """Discovered param URLs must stay on the target host (no off-target sqlmap)."""
     def _run(self, cfg, body):
@@ -698,17 +636,14 @@ class TestDualPortDedupe(unittest.TestCase):
                if c.msf_module == "exploit/multi/misc/java_rmi_server"]
         self.assertEqual(len(rmi), 1)
 
-    def test_auto_exploit_prunes_candidate_list(self):
-        # identify-only path still dedupes res.candidates for the report
-        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab(), identify_only=True)
+    def test_dedupe_prunes_candidate_list_for_report(self):
+        # The orchestrator dedupes the identified candidate list before reporting
+        # (dual-port services collapse to one entry). Public `dedupe` alias.
         h = R.HostResult(ip="10.0.0.5")
         h.services = [_svc(6667, "irc", product="UnrealIRCd"),
                       _svc(6697, "irc", product="UnrealIRCd")]
-        res = E.ExploitResult()
-        for c in E._signature_candidates(h):
-            res.add(c)
-        E.auto_exploit(cfg, h, res)
-        irc = [c for c in res.candidates
+        pruned = E.dedupe(E._signature_candidates(h))
+        irc = [c for c in pruned
                if c.msf_module == "exploit/unix/irc/unreal_ircd_3281_backdoor"]
         self.assertEqual(len(irc), 1)
 

@@ -14,10 +14,10 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 APT_PKGS=(
-  nmap gobuster feroxbuster nikto hydra exploitdb
-  metasploit-framework enum4linux smbclient whatweb ffuf
-  onesixtyone snmp snmp-check sslscan sqlmap
-  default-mysql-client nfs-common seclists wordlists
+  nmap gobuster feroxbuster nikto exploitdb
+  enum4linux smbclient whatweb ffuf
+  onesixtyone snmp snmp-check sslscan
+  nfs-common seclists wordlists
 )
 
 echo "[*] apt update"
@@ -31,32 +31,17 @@ apt-get install -y "${APT_PKGS[@]}" || {
 
 # pipx-installed tools not always in apt
 if command -v pipx >/dev/null 2>&1; then
-  echo "[*] installing pipx tools (droopescan, git-dumper, arjun)"
+  echo "[*] installing pipx tools (droopescan, arjun)"
   pipx install droopescan || true
-  pipx install git-dumper || true
   pipx install arjun || true
 else
-  echo "[!] pipx not found — skip droopescan/git-dumper/arjun, or: apt install pipx"
+  echo "[!] pipx not found — skip droopescan/arjun, or: apt install pipx"
 fi
 
 # wpscan is a Ruby gem
 if command -v gem >/dev/null 2>&1; then
   echo "[*] installing wpscan (gem)"
   gem install wpscan || true
-fi
-
-# Optional Python dep for msfrpc post-exploitation
-echo "[*] installing pymetasploit3 (for --post-exploit over msfrpc)"
-pip install --break-system-packages pymetasploit3 || pip install pymetasploit3 || true
-
-# PEAS scripts for privesc enumeration
-PEAS_DIR=/usr/share/peass
-echo "[*] fetching linpeas/winPEAS into ${PEAS_DIR} (best-effort)"
-mkdir -p "${PEAS_DIR}"
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL -o "${PEAS_DIR}/linpeas.sh" \
-    https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh || \
-    echo "    (couldn't fetch linpeas — download it manually into ${PEAS_DIR})"
 fi
 
 echo "[+] done. Now run: python run.py --check"
