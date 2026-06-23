@@ -37,6 +37,10 @@ _INSTALL_HINTS = {
     "droopescan": "pipx install droopescan",
     "showmount": "apt install nfs-common",
     "arjun": "pipx install arjun",
+    "sqlmap": "apt install sqlmap",
+    "git-dumper": "pipx install git-dumper",
+    "hydra": "apt install hydra",
+    "mysql": "apt install default-mysql-client   # or: apt install mariadb-client",
     # cloud recon (all optional — module has a stdlib HTTP fallback)
     "aws": "apt install awscli   # or: pipx install awscli",
     "s3scanner": "pipx install s3scanner",

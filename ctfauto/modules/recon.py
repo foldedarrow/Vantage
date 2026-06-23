@@ -262,7 +262,10 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> None:
     info("NSE vuln scripts (--script vuln + smb-vuln-*)")
     ports = ",".join(str(s.port) for s in host.services)
     out_path = os.path.join(cfg.out_dir, f"nmap_vuln_{cfg.target.replace('/', '_')}.txt")
-    cmd = ["nmap", "-sV", "-p", ports,
+    # Honour the profile timing (gentle/HTB stays at -T2) — the whole point of the
+    # gentle profile is to be quiet on shared infra, and the NSE pass is the loudest
+    # step. -sV is dropped: recon already version-detected these ports.
+    cmd = ["nmap", cfg.profile.nmap_timing, "-p", ports,
            "--script", "vuln,smb-vuln-*,ssl-enum-ciphers",
            "-oN", out_path, cfg.target]
     rc, out, _ = run(cmd, timeout=1800)

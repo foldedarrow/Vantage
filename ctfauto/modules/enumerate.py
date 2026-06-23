@@ -188,14 +188,25 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
 
     # 2. Quick-win files: robots.txt, .git/, common backups
     if _have(cfg, "curl", quiet=True):
-        for path in ("robots.txt", ".git/HEAD", "sitemap.xml", "backup.zip", ".env", "config.php.bak"):
-            rc, body, _ = run(["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
-                               "-w", "%{http_code}", f"{base}/{path}"], timeout=15)
-            code = body.strip()
-            if code in ("200", "301", "302"):
-                out.append(EnumFinding(svc.port, "http-quickwin",
-                                       f"/{path} -> HTTP {code}",
-                                       tags={"path": path}))
+        # Soft-404 baseline: request a path that cannot exist. If the server still
+        # answers 200/redirect for it, it serves a custom success page for missing
+        # content, so a 200 on a real quick-win path is meaningless — suppress those
+        # to avoid flooding the report with false hits.
+        rc, base_code, _ = run(["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
+                                "-w", "%{http_code}",
+                                f"{base}/ctfauto-nonexistent-{svc.port}.html"], timeout=15)
+        soft404 = base_code.strip() in ("200", "301", "302")
+        if soft404:
+            info(f"{base} soft-404s (success on a missing path); skipping quick-win path checks")
+        else:
+            for path in ("robots.txt", ".git/HEAD", "sitemap.xml", "backup.zip", ".env", "config.php.bak"):
+                rc, body, _ = run(["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
+                                   "-w", "%{http_code}", f"{base}/{path}"], timeout=15)
+                code = body.strip()
+                if code in ("200", "301", "302"):
+                    out.append(EnumFinding(svc.port, "http-quickwin",
+                                           f"/{path} -> HTTP {code}",
+                                           tags={"path": path}))
 
     # 3. Nikto — loud; only when the profile allows it (off on gentle/HTB, #14)
     if cfg.profile.enable_nikto and _have(cfg, "nikto"):
@@ -399,7 +410,18 @@ def _parse_onesixtyone_community(out: str) -> str:
 def _enum_snmp(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     community = ""
     if _have(cfg, "onesixtyone"):
-        rc, o, _ = run(["onesixtyone", cfg.target, *_SNMP_COMMUNITIES], timeout=60)
+        # onesixtyone takes ONE positional community; extra positionals are parsed
+        # as additional HOSTS, so passing the list inline would probe bogus hosts
+        # named 'private'/'community' and only test 'public'. Feed the strings via
+        # a community file (-c) so all of them are actually tried against the target.
+        comm_file = os.path.join(cfg.out_dir, "snmp_communities.txt")
+        try:
+            with open(comm_file, "w") as f:
+                f.write("\n".join(_SNMP_COMMUNITIES) + "\n")
+            rc, o, _ = run(["onesixtyone", "-c", comm_file, cfg.target], timeout=60)
+        except OSError:
+            # fall back to a single-community probe if we can't write the file
+            rc, o, _ = run(["onesixtyone", cfg.target, _SNMP_COMMUNITIES[0]], timeout=60)
         found = _parse_onesixtyone_community(o)
         if found:
             community = found  # use the ACTUAL string, not a hardcoded 'public' (#8)

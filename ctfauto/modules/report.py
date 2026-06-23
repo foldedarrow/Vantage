@@ -185,7 +185,7 @@ def _render_md(cfg, host, enum, exploits) -> str:
                  "from the recon data. It did **not** attempt any of them. Use these "
                  "as leads for manual, authorized testing._\n")
         for c in exploits.candidates:
-            tag = "low-risk lead" if c.safe else "manual / higher-risk"
+            tag = "high-confidence lead" if c.high_confidence else "lead — verify manually"
             cat = f" _[{c.category}]_" if getattr(c, "category", "") else ""
             L.append(f"### :{c.port} — {c.title}  ({tag}){cat}")
             L.append(f"{c.technique}\n")

@@ -65,20 +65,20 @@ class TestDedupe(unittest.TestCase):
     def test_samba_dual_port_dedupes_to_one(self):
         c = lambda port: E.ExploitCandidate(
             port, "Samba usermap", "x",
-            msf_module="exploit/multi/samba/usermap_script", safe=True)
+            msf_module="exploit/multi/samba/usermap_script", high_confidence=True)
         out = E._dedupe([c(139), c(445)])
         self.assertEqual(len(out), 1)
 
     def test_distinct_modules_kept(self):
         a = E.ExploitCandidate(21, "vsftpd", "x",
-                               msf_module="exploit/unix/ftp/vsftpd_234_backdoor", safe=True)
+                               msf_module="exploit/unix/ftp/vsftpd_234_backdoor", high_confidence=True)
         b = E.ExploitCandidate(139, "samba", "x",
-                               msf_module="exploit/multi/samba/usermap_script", safe=True)
+                               msf_module="exploit/multi/samba/usermap_script", high_confidence=True)
         self.assertEqual(len(E._dedupe([a, b])), 2)
 
     def test_searchsploit_entries_not_deduped(self):
-        s1 = E.ExploitCandidate(80, "EDB a", "x", safe=False, category="service")
-        s2 = E.ExploitCandidate(80, "EDB b", "x", safe=False, category="service")
+        s1 = E.ExploitCandidate(80, "EDB a", "x", high_confidence=False, category="service")
+        s2 = E.ExploitCandidate(80, "EDB b", "x", high_confidence=False, category="service")
         self.assertEqual(len(E._dedupe([s1, s2])), 2)
 
 
@@ -365,7 +365,7 @@ class TestSearchsploitPromotion(unittest.TestCase):
         promo = E._promote_candidate(h, s, "2.3.4", ["vsftpd 2.3.4 backdoor -> x"])
         self.assertIsNotNone(promo)
         self.assertEqual(promo.msf_module, "exploit/unix/ftp/vsftpd_234_backdoor")
-        self.assertTrue(promo.safe)
+        self.assertTrue(promo.high_confidence)
 
     def test_no_promote_wrong_version(self):
         h = R.HostResult(ip="10.0.0.1")
@@ -646,6 +646,105 @@ class TestDualPortDedupe(unittest.TestCase):
         irc = [c for c in pruned
                if c.msf_module == "exploit/unix/irc/unreal_ircd_3281_backdoor"]
         self.assertEqual(len(irc), 1)
+
+
+class TestToolDetection(unittest.TestCase):
+    """detect_tools must probe the helpers the exploit-id phase gates on, or those
+    features silently never fire (sqlmap sweep was dead because of this)."""
+    def test_exploit_helpers_are_detected(self):
+        from ctfauto.config import detect_tools
+        keys = set(detect_tools().keys())
+        for tool in ("sqlmap", "git-dumper", "hydra", "mysql"):
+            self.assertIn(tool, keys, tool)
+
+
+class TestSnmpInvocation(unittest.TestCase):
+    """onesixtyone takes ONE positional community; extras are parsed as hosts. All
+    communities must be fed via a -c file so they're actually tested (not just
+    'public', with 'private'/'community' probed as bogus hosts)."""
+    def test_onesixtyone_uses_community_file(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab(),
+                        out_dir=tempfile.mkdtemp(),
+                        discovered_tools={"onesixtyone": "/usr/bin/onesixtyone"})
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            return (0, "10.0.0.5 [private] Hardware: x", "")
+
+        with mock.patch.object(EN, "run", side_effect=fake_run):
+            out = []
+            EN._enum_snmp(cfg, _svc(161, "snmp"), out)
+
+        o161 = next(c for c in calls if c and c[0] == "onesixtyone")
+        self.assertIn("-c", o161)
+        # the three community strings must NOT appear as positional host args
+        self.assertNotIn("private", [tok for tok in o161 if tok != "-c"][2:])
+
+
+class TestNSEProfileTiming(unittest.TestCase):
+    """The NSE vuln pass is the loudest step; it must honour the profile timing
+    (gentle stays -T2) and not re-run -sV (recon already version-detected)."""
+    def test_nse_uses_profile_timing_and_no_sV(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.gentle(),
+                        out_dir=tempfile.mkdtemp())
+        h = R.HostResult(ip="10.0.0.5")
+        h.services = [_svc(445, "microsoft-ds")]
+        captured = {}
+
+        def fake_run(cmd, *a, **k):
+            captured["cmd"] = cmd
+            return (0, "", "")
+
+        with mock.patch.object(R, "run", side_effect=fake_run):
+            R._nse_vuln_scan(cfg, h)
+
+        cmd = captured["cmd"]
+        self.assertIn("-T2", cmd)        # gentle timing carried through
+        self.assertNotIn("-sV", cmd)     # redundant version scan dropped
+
+
+class TestCommandQuoting(unittest.TestCase):
+    """Attacker-influenced data (service banner, crawled URLs) is interpolated into
+    copy-pasteable command strings; it must be shell-quoted so a hostile target
+    can't inject metacharacters into a command an operator pastes verbatim."""
+    def test_param_url_with_quote_is_escaped(self):
+        import shlex
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab())
+        evil = "http://10.0.0.1/x.php?a=1';rm -rf ~;'"
+        er = EN.EnumResult()
+        er.findings.append(EN.EnumFinding(80, "param-url", "x", tags={"param_url": evil}))
+        cands = E._web_candidates(cfg, R.HostResult(ip="10.0.0.1"), er)
+        sqli = next(c for c in cands if c.web_action == "sqlmap")
+        # When a shell parses the command, the hostile URL stays ONE intact token
+        # and never becomes a separate `rm` command.
+        toks = shlex.split(sqli.command)
+        self.assertIn(evil, toks)
+        self.assertNotIn("rm", toks)
+
+    def test_searchsploit_banner_is_quoted(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"searchsploit": "/usr/bin/searchsploit"})
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(21, "ftp", product="evil; rm -rf ~", version="")]
+        with mock.patch.object(E, "run", return_value=(0, "[]", "")):
+            cands = E._searchsploit_candidates(cfg, h)
+        for c in cands:
+            if c.command.startswith("searchsploit "):
+                self.assertNotIn("; rm -rf ~", c.command)
+
+
+class TestSoft404Guard(unittest.TestCase):
+    """A server that returns 200 for a missing path soft-404s; quick-win path hits
+    must be suppressed to avoid flooding the report with false positives."""
+    def test_soft404_suppresses_quickwins(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"curl": "/usr/bin/curl"})
+        # Every curl returns 200 -> baseline also 200 -> soft-404.
+        with mock.patch.object(EN, "run", return_value=(0, "200", "")):
+            out = []
+            EN._enum_http(cfg, _svc(80, "http"), out)
+        self.assertFalse([f for f in out if f.tool == "http-quickwin"])
 
 
 if __name__ == "__main__":

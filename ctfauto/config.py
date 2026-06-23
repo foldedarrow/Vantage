@@ -175,6 +175,8 @@ def detect_tools() -> dict:
         "onesixtyone", "snmpwalk", "snmp-check", "sslscan",
         "wpscan", "droopescan", "mount", "showmount",
         "feroxbuster", "arjun",
+        # exploit-identification helpers (presence drives which leads we surface)
+        "sqlmap", "git-dumper", "hydra", "mysql",
         # cloud recon (unauthenticated misconfig discovery)
         "aws", "s3scanner", "cloud_enum",
     ]
