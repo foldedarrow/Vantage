@@ -43,6 +43,17 @@ class EnumResult:
         return [f.tags[key] for f in self.findings if key in f.tags]
 
 
+# A common browser UA used in --stealth so requests don't carry the obvious
+# 'curl/8.x' / 'WhatWeb' signatures a WAF/IDS flags immediately.
+_STEALTH_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def _ua_args(cfg: RunConfig) -> list[str]:
+    """curl -A <browser UA> when in stealth mode, else nothing."""
+    return ["-A", _STEALTH_UA] if getattr(cfg, "stealth", False) else []
+
+
 def _have(cfg: RunConfig, tool: str, quiet: bool = False) -> bool:
     if cfg.discovered_tools.get(tool):
         return True
@@ -226,7 +237,10 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     # 1. Fingerprint stack
     cms = ""
     if _have(cfg, "whatweb"):
-        rc, ww, _ = run(["whatweb", "--color=never", base], timeout=120)
+        ww_cmd = ["whatweb", "--color=never"]
+        if cfg.stealth:
+            ww_cmd += ["--user-agent", _STEALTH_UA, "--max-threads", "1"]
+        rc, ww, _ = run(ww_cmd + [base], timeout=120)
         if ww.strip():
             # Pull the real server product+version (nmap often mislabels web ports —
             # e.g. 'webdav' for a lighttpd box); these tags let the exploit phase
@@ -256,16 +270,17 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         # answers 200/redirect for it, it serves a custom success page for missing
         # content, so a 200 on a real quick-win path is meaningless — suppress those
         # to avoid flooding the report with false hits.
-        rc, base_code, _ = run(["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
-                                "-w", "%{http_code}",
+        rc, base_code, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
+                                "-o", "/dev/null", "-w", "%{http_code}",
                                 f"{base}/ctfauto-nonexistent-{svc.port}.html"], timeout=15)
         soft404 = base_code.strip() in ("200", "301", "302")
         if soft404:
             info(f"{base} soft-404s (success on a missing path); skipping quick-win path checks")
         else:
             for path in ("robots.txt", ".git/HEAD", "sitemap.xml", "backup.zip", ".env", "config.php.bak"):
-                rc, body, _ = run(["curl", "-sk", "--max-time", "10", "-o", "/dev/null",
-                                   "-w", "%{http_code}", f"{base}/{path}"], timeout=15)
+                rc, body, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
+                                   "-o", "/dev/null", "-w", "%{http_code}",
+                                   f"{base}/{path}"], timeout=15)
                 code = body.strip()
                 if code in ("200", "301", "302"):
                     out.append(EnumFinding(svc.port, "http-quickwin",
@@ -277,7 +292,7 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     if _have(cfg, "curl", quiet=True):
         for path in ("swagger.json", "openapi.json", "api-docs", "v2/api-docs",
                      "swagger-ui.html", "graphql", "api", "actuator", "actuator/env"):
-            rc, body, _ = run(["curl", "-sk", "--max-time", "10",
+            rc, body, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
                                f"{base}/{path}"], timeout=15)
             low = body.lower()
             if any(k in low for k in ('"swagger"', '"openapi"', '"paths"',

@@ -136,6 +136,37 @@ tools are installed and the exact install command for whatever's missing.
    *not run*, intended as leads for manual follow-up. An incremental
    `events_<target>.ndjson` event log is written for automation/re-analysis.
 
+## Stealth / evasion (authorized detection testing)
+
+`--stealth` runs a **low-and-slow, low-signature** recon — for **authorized** work
+where the goal is measuring your own detection (does the SOC/IDS/WAF see the scan?),
+not actually hiding from a defender you don't have permission to test. It does **not**
+loosen the authorization gate: an `external` target still needs `--allow-external`.
+
+What it changes:
+
+- **nmap:** `-T1` timing, **fragmented packets** (`-f`), a hard **`--max-rate`** cap
+  (default 50 pps), **`--scan-delay`** (default 250ms), `--max-retries 1`,
+  `--randomize-hosts`, top-ports only (fewer packets), and **no `-O`/`-sC`** (both
+  add probes). On a CIDR it keeps host discovery so dead hosts are pruned.
+- **Loud tools off:** no nikto, no dir-brute, no NSE `--script vuln`, no active web
+  crawl — those trip IDS/WAF instantly.
+- **Request layer:** web requests use a browser **User-Agent** instead of the
+  obvious `curl/8.x` / `WhatWeb` signatures; enumeration is serialised.
+
+Optional knobs (need root / raw packets, which the `sudo` invocation already has):
+
+```bash
+sudo python3 run.py 10.0.0.5 --stealth \
+  --source-port 53 \           # appear to come from DNS to slip naive ACLs
+  --decoys RND:5 \             # hide the real source among 5 decoys (or ip1,ip2,ME)
+  --scan-delay 1s --max-rate 20   # even slower
+# --no-fragment if a NIC/hypervisor mangles fragmented packets
+```
+
+> Use stealth only against systems you're authorized to test. It's a tool for
+> validating *your own* monitoring, not for evading defenders elsewhere.
+
 ## Cloud recon (unauthenticated misconfiguration discovery)
 
 ctfauto can enumerate **publicly-exposed** cloud storage for a target — the cloud

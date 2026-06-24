@@ -110,6 +110,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true",
                    help="Skip the authorization prompt (lab/HTB only; external still "
                         "requires --allow-external)")
+    # --- stealth / evasion (authorized testing of detection capability) -------
+    stealth = p.add_argument_group(
+        "stealth / evasion (for AUTHORIZED testing of your own detection — does the "
+        "SOC/IDS see the scan?). Does NOT bypass the authorization gate.")
+    stealth.add_argument("--stealth", action="store_true",
+                         help="Low-and-slow, low-signature recon: -T1, fragmented "
+                              "packets, rate-capped, and the loud tools (nikto, "
+                              "dir-brute, NSE vuln, active web) disabled.")
+    stealth.add_argument("--scan-delay", default="",
+                         help="nmap --scan-delay between probes (e.g. 500ms, 1s). "
+                              "Default 250ms in --stealth.")
+    stealth.add_argument("--max-rate", type=int, default=0,
+                         help="nmap --max-rate cap in packets/sec. Default 50 in --stealth.")
+    stealth.add_argument("--source-port", type=int, default=0,
+                         help="nmap --source-port (e.g. 53, 80, 443) to slip past ACLs "
+                              "that trust those source ports.")
+    stealth.add_argument("--decoys", default="",
+                         help="nmap -D decoy list to obscure the real source — e.g. "
+                              "'RND:5' (5 random) or 'ip1,ip2,ME'. Authorized testing only.")
+    stealth.add_argument("--no-fragment", action="store_true",
+                         help="Disable IP fragmentation (-f) in --stealth (some NICs/"
+                              "hypervisors mangle fragments).")
     # --- cloud recon (unauthenticated public-misconfiguration discovery) ------
     cloud = p.add_argument_group("cloud recon (unauthenticated misconfig discovery)")
     cloud.add_argument("--cloud", action="store_true",
@@ -363,7 +385,11 @@ def build_config(args) -> RunConfig:
     #   --profile auto       : lab->lab, htb->gentle. For external we DEFER the
     #                          choice to the authorization gate, which prompts the
     #                          operator to pick lab vs gentle (was force-gentle).
-    if args.profile == "gentle":
+    if args.stealth:
+        # Stealth takes precedence over any profile choice: it's a different goal
+        # (minimise signature) and must not be silently widened by --profile lab.
+        profile = Profile.stealth()
+    elif args.profile == "gentle":
         profile = Profile.gentle()
     elif args.profile == "lab":
         profile = Profile.lab()
@@ -381,8 +407,8 @@ def build_config(args) -> RunConfig:
 
     # --aggressive is lab-only by default, but an explicitly-authorized external
     # target may opt into it (the operator asserts scope via --allow-external).
-    aggressive = args.aggressive and (klass == "lab" or
-                                      (klass == "external" and args.allow_external))
+    aggressive = args.aggressive and not args.stealth and (
+        klass == "lab" or (klass == "external" and args.allow_external))
 
     cfg = RunConfig(
         target=target,
@@ -399,6 +425,12 @@ def build_config(args) -> RunConfig:
         connect_scan=args.connect_scan,
         no_udp=args.no_udp,
         no_nse_vuln=args.no_nse_vuln,
+        stealth=args.stealth,
+        scan_delay=args.scan_delay,
+        max_rate=args.max_rate,
+        source_port=args.source_port,
+        decoys=args.decoys,
+        no_fragment=args.no_fragment,
         default_creds=not args.no_default_creds,
         seclists_dir=args.seclists_dir,
         klass=klass,
@@ -417,8 +449,9 @@ def build_config(args) -> RunConfig:
     if args.aggressive and klass == "external" and not args.allow_external:
         warn("--aggressive ignored: external target needs --allow-external too.")
     # remember whether the operator left profile selection on 'auto' so the gate
-    # knows it's allowed to prompt for an external profile upgrade.
-    cfg.profile_is_auto = (args.profile == "auto")
+    # knows it's allowed to prompt for an external profile upgrade. Stealth pins the
+    # profile deliberately, so never prompt to widen it to the loud lab profile.
+    cfg.profile_is_auto = (args.profile == "auto") and not args.stealth
     return cfg
 
 

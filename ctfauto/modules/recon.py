@@ -59,11 +59,38 @@ def _discovery_perf_flags(cfg: RunConfig) -> list[str]:
     For a CIDR we deliberately KEEP discovery so dead hosts are pruned from the
     sweep. `--max-retries 2` stops slow-filtered ports stalling the run; lab gets
     `--min-rate 1000` for speed (omitted on gentle/HTB to stay polite)."""
+    if getattr(cfg, "stealth", False):
+        return _stealth_nmap_flags(cfg)
     flags = ["--max-retries", "2"]
     if not is_cidr(cfg.target):
         flags.insert(0, "-Pn")
     if cfg.profile.nmap_timing == "-T4":  # lab profile
         flags += ["--min-rate", "1000"]
+    return flags
+
+
+def _stealth_nmap_flags(cfg: RunConfig) -> list[str]:
+    """Evasion flags for AUTHORIZED detection testing. Low-and-slow + signature
+    reduction so you can measure whether the SOC/IDS catches it:
+      -f               fragment packets (defeat naive signature matching)
+      --max-rate       hard cap on packets/sec (default 50 — well under most thresholds)
+      --scan-delay     space probes out in time (default 250ms)
+      --max-retries 1  fewer retransmits = fewer packets
+      --randomize-hosts shuffle target order on a sweep
+      --source-port    optional: appear to come from 53/80/443 to slip naive ACLs
+      -D               optional: hide the real source among decoys
+    All of these need root (raw packets); ctfauto already runs under sudo."""
+    flags: list[str] = ["--max-retries", "1", "--randomize-hosts"]
+    if not is_cidr(cfg.target):
+        flags.insert(0, "-Pn")
+    if not getattr(cfg, "no_fragment", False):
+        flags.append("-f")
+    flags += ["--max-rate", str(cfg.max_rate or 50)]
+    flags += ["--scan-delay", cfg.scan_delay or "250ms"]
+    if cfg.source_port:
+        flags += ["--source-port", str(cfg.source_port)]
+    if cfg.decoys:
+        flags += ["-D", cfg.decoys]
     return flags
 
 

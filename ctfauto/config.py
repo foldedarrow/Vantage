@@ -109,6 +109,27 @@ class Profile:
             full_tcp=True,
         )
 
+    @classmethod
+    def stealth(cls) -> "Profile":
+        """Low-and-slow, low-signature recon for AUTHORIZED testing of detection
+        capabilities (does the SOC/IDS see it?). Drops the loud stuff: no -O / -sC
+        (extra probes), no NSE vuln scripts, no nikto, no dir-brute, no active web —
+        those flood IDS/WAF. Pairs with the stealth nmap flags in recon (slow timing,
+        fragmentation, rate cap, source-port, optional decoys)."""
+        return cls(
+            name="stealth (low-and-slow, evasive)",
+            nmap_timing="-T1",                          # 'sneaky' timing
+            nmap_args="-sV --open --version-intensity 2",  # no -O / -sC (loud)
+            http_threads=2,
+            udp_scan=False,
+            nse_vuln=False,                             # --script vuln is very noisy
+            parallelism=1,                              # serialise to flatten the footprint
+            enable_nikto=False,
+            enable_dirbust=False,                       # dir-brute is an IDS-bait flood
+            enable_active_web=False,
+            full_tcp=False,                             # top-ports only -> far fewer packets
+        )
+
 
 @dataclass
 class RunConfig:
@@ -125,6 +146,13 @@ class RunConfig:
     max_time: int = 0                # global wall-clock budget (s); 0 = unlimited (#17)
     connect_scan: bool = False       # force nmap -sT connect scan (skip SYN scan)
     no_udp: bool = False             # force-disable UDP even on lab
+    # --- stealth / evasion (authorized detection testing) ---------------------
+    stealth: bool = False            # low-and-slow, low-signature recon
+    scan_delay: str = ""             # nmap --scan-delay (e.g. '500ms'); stealth default if ''
+    max_rate: int = 0                # nmap --max-rate pps; stealth default if 0
+    source_port: int = 0             # nmap --source-port (e.g. 53/80/443) to slip naive ACLs
+    decoys: str = ""                 # nmap -D decoy list (e.g. 'RND:5' or ip1,ip2,ME)
+    no_fragment: bool = False        # disable IP fragmentation (-f) in stealth mode
     no_nse_vuln: bool = False        # force-disable --script vuln
     default_creds: bool = True       # flag known default-cred pairs in the report (identify-only)
     # --- scope / authorization (issues #1, #2, #4) ----------------------------

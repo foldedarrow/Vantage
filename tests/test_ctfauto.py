@@ -1057,5 +1057,61 @@ class TestDefaultCredCommand(unittest.TestCase):
         self.assertNotIn("# auto-checked", cands[0].command)
 
 
+class TestStealth(unittest.TestCase):
+    """Stealth mode: low-and-slow nmap + loud tools off, for authorized detection
+    testing. Must not loosen the authorization gate."""
+    def test_profile_disables_loud_tools(self):
+        p = Profile.stealth()
+        self.assertFalse(p.enable_nikto)
+        self.assertFalse(p.enable_dirbust)
+        self.assertFalse(p.nse_vuln)
+        self.assertFalse(p.enable_active_web)
+        self.assertEqual(p.nmap_timing, "-T1")
+        self.assertNotIn("-O", p.nmap_args)    # OS detection is loud
+        self.assertNotIn("-sC", p.nmap_args)   # default scripts are loud
+
+    def test_nmap_flags_single_host(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.stealth(), stealth=True)
+        flags = R._discovery_perf_flags(cfg)
+        for f in ("-Pn", "-f", "--max-rate", "--scan-delay", "--randomize-hosts"):
+            self.assertIn(f, flags)
+        self.assertNotIn("--min-rate", flags)  # the opposite of stealth
+
+    def test_nmap_flags_cidr_keeps_discovery(self):
+        cfg = RunConfig(target="10.0.0.0/24", profile=Profile.stealth(), stealth=True)
+        self.assertNotIn("-Pn", R._discovery_perf_flags(cfg))
+
+    def test_source_port_and_decoys_passthrough(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.stealth(), stealth=True,
+                        source_port=53, decoys="RND:5")
+        flags = R._discovery_perf_flags(cfg)
+        self.assertIn("--source-port", flags); self.assertIn("53", flags)
+        self.assertIn("-D", flags); self.assertIn("RND:5", flags)
+
+    def test_no_fragment_drops_f(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.stealth(),
+                        stealth=True, no_fragment=True)
+        self.assertNotIn("-f", R._discovery_perf_flags(cfg))
+
+    def test_ua_args_only_in_stealth(self):
+        self.assertEqual(EN._ua_args(RunConfig(target="x", profile=Profile.stealth(),
+                                               stealth=True))[0], "-A")
+        self.assertEqual(EN._ua_args(RunConfig(target="x", profile=Profile.lab())), [])
+
+    def test_cli_stealth_overrides_profile(self):
+        from ctfauto import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(
+            ["10.0.0.5", "--stealth", "--profile", "lab"]))
+        self.assertTrue(cfg.stealth)
+        self.assertIn("stealth", cfg.profile.name)   # beats --profile lab
+        self.assertFalse(cfg.profile_is_auto)        # gate won't prompt to widen
+
+    def test_cli_stealth_disables_aggressive(self):
+        from ctfauto import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(
+            ["10.0.0.5", "--stealth", "--aggressive"]))
+        self.assertFalse(cfg.aggressive)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
