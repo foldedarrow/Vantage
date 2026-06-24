@@ -14,6 +14,39 @@ informational: a starting point for manual, authorized testing.
 > ctfauto at systems you own or have explicit written permission to test. Scanning
 > systems you don't control is illegal in most jurisdictions.
 
+## How it works at a glance
+
+ctfauto is a CLI that orchestrates the standard Kali toolchain (nmap, gobuster,
+nikto, searchsploit, …) rather than reimplementing it — it's stdlib-only itself
+and skips any step whose tool is missing. A run moves through four phases:
+
+1. **Recon** — nmap scan + service/version detection, parsed from XML. Handles the
+   real-world gotchas: auto-falls-back to a connect scan when SYN scanning returns
+   `tcpwrapped`, adds `-Pn` for single hosts (firewalled boxes don't scan as
+   "down"), and runs UDP + NSE vuln scripts on the lab profile.
+2. **Enumeration** — per-service handlers run concurrently: HTTP (whatweb,
+   dir-brute, quick-wins, vhost/API/Swagger discovery, CMS scanners), SMB shares,
+   SNMP, FTP-anon, and read-only unauthenticated checks for Redis / Elasticsearch /
+   Docker API / LDAP.
+3. **Exploit identification (report-only)** — matches banners + NSE-flagged CVEs
+   against curated signatures, version-matched searchsploit results, default-cred
+   and web (SQLi/LFI/SSTI) candidates. Nothing is fired; these are leads.
+4. **Report** — Markdown + JSON + an NDJSON event stream, led by a ranked
+   **Priority leads** worklist (RCE → unauthenticated access → CVEs → default creds).
+
+**The classification model drives everything.** Each target is classed `htb`,
+`lab` (RFC1918), or `external`, which selects a profile — `gentle` (quiet, for HTB
+shared infra), `lab` (loud and thorough, for your own VMs), or a refused-by-default
+`external` that needs `--allow-external` (and, optionally, an authoritative
+`--scope-file` allowlist). So the safety model is about **who you're allowed to
+scan**, not about gating an attack — because it never attacks. See
+[Safety model](#safety-model).
+
+**Also included:** CIDR sweeps (live-host discovery → full pipeline per host → a
+ranked index), `--resume`, a global `--max-time` budget, secret redaction in the
+Markdown report, SecLists auto-detection, and an optional read-only **web
+dashboard** (`webui/`) for browsing results.
+
 ## Quick start
 
 ```bash
