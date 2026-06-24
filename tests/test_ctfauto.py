@@ -945,5 +945,117 @@ class TestSearchsploitNoiseGuard(unittest.TestCase):
         self.assertTrue(run_mock.called)
 
 
+class TestNseCvss(unittest.TestCase):
+    """NSE CVEs are parsed with their CVSS and ranked high->low; the report/leads
+    use that instead of dumping an unordered list."""
+    def test_cves_ranked_by_cvss(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(), out_dir=tempfile.mkdtemp())
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(22, "ssh")]
+        out = ("22/tcp open ssh\n"
+               "| vulners:\n"
+               "|   CVE-2025-61985    3.6    https://vulners.com/cve/CVE-2025-61985\n"
+               "|   CVE-2026-35414    8.1    https://vulners.com/cve/CVE-2026-35414\n")
+        with mock.patch.object(R, "run", return_value=(0, out, "")):
+            R._nse_vuln_scan(cfg, h)
+        self.assertEqual(h.nse_cves[0], "CVE-2026-35414")          # highest CVSS first
+        self.assertEqual(h.nse_cve_scores["CVE-2026-35414"], 8.1)
+        self.assertEqual(h.nse_cve_scores["CVE-2025-61985"], 3.6)
+
+    def test_nse_not_bridged_into_enum(self):
+        # NSE is rendered in its own report section, NOT duplicated as enum findings.
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.gentle())
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(22, "ssh")]
+        h.nse_by_port = {"22": ["VULNERABLE: CVE-2026-35414"]}
+        res = EN._enumerate_host_fresh(cfg, h)
+        self.assertFalse([f for f in res.findings if f.tool == "nmap-nse"])
+
+    def test_leads_drop_low_cvss(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.nse_cves = ["CVE-HIGH", "CVE-LOW"]
+        h.nse_cve_scores = {"CVE-HIGH": 8.1, "CVE-LOW": 3.6}
+        leads = " ".join(RP._priority_leads(h, EN.EnumResult(), E.ExploitResult()))
+        self.assertIn("CVE-HIGH", leads)
+        self.assertNotIn("CVE-LOW", leads)   # sub-7.0 vulners noise not promoted
+
+    def test_unscored_vulnerable_still_lead(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.nse_cves = ["CVE-2007-6750"]; h.nse_cve_scores = {}   # slowloris, no CVSS
+        leads = " ".join(RP._priority_leads(h, EN.EnumResult(), E.ExploitResult()))
+        self.assertIn("CVE-2007-6750", leads)
+
+
+class TestWebFingerprint(unittest.TestCase):
+    def test_parse_server_httpserver(self):
+        self.assertEqual(EN._parse_whatweb_server("a HTTPServer[lighttpd/1.4.76] b"),
+                         ("lighttpd", "1.4.76"))
+
+    def test_parse_server_plugin_token(self):
+        self.assertEqual(EN._parse_whatweb_server("x Apache[2.4.52] y"), ("Apache", "2.4.52"))
+
+    def test_parse_server_none(self):
+        self.assertEqual(EN._parse_whatweb_server("no server disclosed"), ("", ""))
+
+    def test_identify_known_app(self):
+        app = EN._identify_web_app("http://x [403] Title[Pi-hole pihole], IP[10.0.0.1]")
+        self.assertIsNotNone(app)
+        self.assertEqual(app[0], "Pi-hole admin")
+        self.assertTrue(app[1])               # sensitive -> mgmt panel
+
+    def test_identify_no_app(self):
+        self.assertIsNone(EN._identify_web_app("Title[Just a personal blog]"))
+
+    def test_web_panel_promoted_to_lead(self):
+        en = EN.EnumResult()
+        en.findings.append(EN.EnumFinding(80, "web-app", "Pi-hole admin detected",
+                                          tags={"web_panel": True, "app": "Pi-hole admin"}))
+        leads = RP._priority_leads(R.HostResult(ip="10.0.0.1"), en, E.ExploitResult())
+        self.assertTrue(any("Mgmt panel" in l for l in leads))
+
+
+class TestSearchsploitWebOverride(unittest.TestCase):
+    """When nmap mislabels a web port, searchsploit should query the whatweb
+    product (lighttpd), not nmap's guess (webdav)."""
+    def _cfg(self):
+        return RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                         discovered_tools={"searchsploit": "/usr/bin/searchsploit"})
+
+    def test_uses_whatweb_product_for_generic_service(self):
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(80, "webdav")]
+        en = EN.EnumResult()
+        en.findings.append(EN.EnumFinding(80, "whatweb", "fp: lighttpd 1.4.76",
+                                          tags={"http_product": "lighttpd",
+                                                "http_version": "1.4.76"}))
+        captured = {}
+        def fake_run(cmd, *a, **k):
+            captured["cmd"] = cmd
+            return (0, "[]", "")
+        with mock.patch.object(E, "run", side_effect=fake_run):
+            E._searchsploit_candidates(self._cfg(), h, en)
+        self.assertIn("lighttpd 1.4.76", " ".join(captured.get("cmd", [])))
+
+    def test_generic_with_no_fingerprint_still_skipped(self):
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(80, "webdav")]
+        with mock.patch.object(E, "run") as run_mock:
+            cands = E._searchsploit_candidates(self._cfg(), h, EN.EnumResult())
+        run_mock.assert_not_called()
+        self.assertEqual(cands, [])
+
+
+class TestDefaultCredCommand(unittest.TestCase):
+    def test_ssh_command_is_runnable(self):
+        cmd = E._default_cred_command("ssh", "10.0.0.1", 22,
+                                      [("root", "root"), ("admin", "admin")])
+        self.assertIn("hydra -C", cmd)
+        self.assertIn("ssh://10.0.0.1:22", cmd)
+        self.assertNotIn("# auto-checked", cmd)
+
+    def test_candidate_no_longer_placeholder(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(), default_creds=True)
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(22, "ssh")]
+        cands = E._default_cred_candidates(cfg, h)
+        self.assertTrue(cands)
+        self.assertNotIn("# auto-checked", cands[0].command)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

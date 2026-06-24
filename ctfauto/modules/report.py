@@ -156,10 +156,19 @@ def _priority_leads(host, enum, exploits) -> list[str]:
                              "exposed (host takeover)"))
         if t.get("anon_ldap"):
             tiers.append((2, f"**Anon access** · :{f.service_port} — anonymous LDAP bind"))
+        if t.get("web_panel"):
+            tiers.append((2, f"**Mgmt panel** · :{f.service_port} — {f.summary}"))
 
-    # 3. NSE-flagged CVEs (known-vulnerable services).
+    # 3. NSE-flagged CVEs — rank by CVSS. Only the serious ones (>=7.0) and
+    #    confirmed-VULNERABLE unscored hits become leads; low/medium vulners noise
+    #    stays in the NSE section, not the worklist.
+    scores = getattr(host, "nse_cve_scores", {}) or {}
     for cve in getattr(host, "nse_cves", []) or []:
-        tiers.append((3, f"**Known CVE** · {cve} flagged by NSE vuln scan"))
+        score = scores.get(cve)
+        if score is None:
+            tiers.append((3, f"**Known CVE** · {cve} — NSE-flagged VULNERABLE; verify"))
+        elif score >= 7.0:
+            tiers.append((3, f"**Known CVE** · {cve} (CVSS {score}) — NSE-flagged; verify"))
 
     # 4. Default-credential checks worth trying.
     for c in getattr(exploits, "candidates", []):
@@ -248,7 +257,10 @@ def _render_md(cfg, host, enum, exploits) -> str:
         L.append("## NSE vuln-script findings\n")
         cves = getattr(host, "nse_cves", []) or []
         if cves:
-            L.append(f"**CVEs flagged:** {', '.join(cves)}\n")
+            scores = getattr(host, "nse_cve_scores", {}) or {}
+            # already CVSS-ranked in recon; annotate with the score where known.
+            labelled = [f"{c} ({scores[c]})" if c in scores else c for c in cves]
+            L.append(f"**CVEs flagged (CVSS-ranked):** {', '.join(labelled)}\n")
         for port in sorted(nse_by_port,
                            key=lambda p: int(p) if p.isdigit() else 1 << 30):
             lines = nse_by_port[port]

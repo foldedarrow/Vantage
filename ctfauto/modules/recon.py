@@ -33,7 +33,8 @@ class HostResult:
     udp_services: list[Service] = field(default_factory=list)
     nse_vuln_hits: list[str] = field(default_factory=list)  # flat parsed lines (compat)
     nse_by_port: dict = field(default_factory=dict)         # port(str) -> [lines]
-    nse_cves: list[str] = field(default_factory=list)       # unique CVE IDs flagged
+    nse_cves: list[str] = field(default_factory=list)       # unique CVE IDs, CVSS-desc
+    nse_cve_scores: dict = field(default_factory=dict)      # CVE id -> CVSS float (if seen)
 
     @property
     def all_services(self) -> list[Service]:
@@ -134,7 +135,8 @@ def _host_from_state(d: dict) -> HostResult | None:
                           os_guess=r.get("os_guess", ""),
                           nse_vuln_hits=r.get("nse_vuln_hits", []),
                           nse_by_port=r.get("nse_by_port", {}),
-                          nse_cves=r.get("nse_cves", []))
+                          nse_cves=r.get("nse_cves", []),
+                          nse_cve_scores=r.get("nse_cve_scores", {}))
         host.services = [Service(**s) for s in r.get("services", [])]
         host.udp_services = [Service(**s) for s in r.get("udp_services", [])]
         return host
@@ -312,7 +314,10 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> None:
     by_port: dict[str, list[str]] = {}
     flat: list[str] = []
     cves: list[str] = []
+    scores: dict[str, float] = {}
     cve_re = _re.compile(r"CVE-\d{4}-\d{4,7}")
+    # vulners lines look like 'CVE-2026-35414    8.1    https://...'; capture the score.
+    cve_score_re = _re.compile(r"(CVE-\d{4}-\d{4,7})\s+(\d{1,2}(?:\.\d)?)\b")
     cur_port = "?"
     for line in out.splitlines():
         stripped = line.strip()
@@ -326,10 +331,18 @@ def _nse_vuln_scan(cfg: RunConfig, host: HostResult) -> None:
             for cve in cve_re.findall(stripped):
                 if cve not in cves:
                     cves.append(cve)
+            for cve, score in cve_score_re.findall(stripped):
+                try:
+                    scores[cve] = float(score)
+                except ValueError:
+                    pass
 
+    # Rank CVEs by CVSS (highest first); unscored ones sort last but stay listed.
+    cves.sort(key=lambda c: scores.get(c, -1.0), reverse=True)
     host.nse_by_port = by_port
     host.nse_vuln_hits = flat
     host.nse_cves = cves
+    host.nse_cve_scores = scores
     if flat:
         n_ports = len(by_port)
         good(f"NSE flagged {len(flat)} vuln line(s) across {n_ports} port(s); "

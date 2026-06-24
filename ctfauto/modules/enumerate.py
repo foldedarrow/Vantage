@@ -158,28 +158,66 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
     for batch in batches:
         res.extend(batch)
 
-    # Surface NSE vuln hits from recon as enumeration findings — GROUPED one
-    # finding per port (previously one-per-line, which exploded the report).
-    nse_by_port = getattr(host, "nse_by_port", None)
-    if nse_by_port:
-        for port, lines in sorted(nse_by_port.items(),
-                                  key=lambda kv: (kv[0].isdigit(), int(kv[0]) if kv[0].isdigit() else 0)):
-            try:
-                pnum = int(port)
-            except (TypeError, ValueError):
-                pnum = 0
-            res.add(EnumFinding(pnum, "nmap-nse",
-                                f"{len(lines)} vuln-script line(s) on :{port}",
-                                "\n".join(lines)))
-    elif host.nse_vuln_hits:
-        # back-compat: flat list with no grouping info
-        res.add(EnumFinding(0, "nmap-nse",
-                            f"{len(host.nse_vuln_hits)} vuln-script line(s)",
-                            "\n".join(host.nse_vuln_hits)))
+    # NSE vuln hits are NOT bridged into enum findings: the report renders them in
+    # its own dedicated "NSE vuln-script findings" section (grouped per port with a
+    # CVSS-ranked CVE summary). Bridging them here duplicated every line in the
+    # report. host.nse_by_port / nse_cves carry the data straight to the report.
     return res
 
 
 # --- HTTP --------------------------------------------------------------------
+def _parse_whatweb_server(ww: str) -> tuple[str, str]:
+    """Extract (product, version) for the web server from whatweb output, e.g.
+    'HTTPServer[lighttpd/1.4.76]' -> ('lighttpd','1.4.76'). Returns ('','') if the
+    server isn't disclosed (some 403s hide it)."""
+    m = re.search(r"HTTPServer\[([^\]]+)\]", ww)
+    token = m.group(1) if m else ""
+    if not token:
+        for srv in ("Apache", "nginx", "lighttpd", "Microsoft-IIS", "openresty", "Jetty"):
+            m2 = re.search(rf"\b{srv}\[([^\]]+)\]", ww)
+            if m2:
+                token = f"{srv}/{m2.group(1)}"
+                break
+    if not token:
+        return "", ""
+    token = token.split("(")[0].strip()      # drop '(Ubuntu)' etc.
+    if "/" in token:
+        prod, _, ver = token.partition("/")
+        return prod.strip(), ver.strip()
+    return token.strip(), ""
+
+
+# Known web apps → (app name, sensitive?, follow-up hint). Matched against whatweb
+# output (titles/headers/plugins), lowercased. 'sensitive' apps are management/admin
+# surfaces worth promoting to a priority lead.
+_WEB_APP_SIGNATURES = [
+    ("title[pi-hole", "Pi-hole admin", True,
+     "Admin UI at /admin — check the web password; `searchsploit pi-hole` for app CVEs."),
+    ("title[grafana", "Grafana", True,
+     "Login at /login (default admin:admin); check version against CVE-2021-43798 (path traversal)."),
+    ("x-jenkins[", "Jenkins", True,
+     "Script console at /script = RCE if unauthenticated; enumerate /asynchPeople, check version CVEs."),
+    ("phpmyadmin", "phpMyAdmin", True,
+     "At /phpmyadmin — try DB default creds; `searchsploit phpmyadmin` for version RCEs."),
+    ("title[gitea", "Gitea", True, "Check for open registration and version CVEs."),
+    ("title[proxmox virtual environment", "Proxmox VE", True, "Login at :8006; check known CVEs."),
+    ("title[pfsense", "pfSense", True, "Default admin:pfsense; check firmware CVEs."),
+    ("title[portainer", "Portainer", True, "Initial-admin race / weak creds; manages Docker."),
+    ("kibana", "Kibana", True, "Check version against known prototype-pollution/RCE CVEs."),
+    ("title[adminer", "Adminer", True, "DB admin at this path; try default DB creds; SSRF CVEs."),
+]
+
+
+def _identify_web_app(ww: str) -> tuple[str, bool, str] | None:
+    """Return (app, sensitive, hint) for the first known web app matched in the
+    whatweb output, else None."""
+    low = ww.lower()
+    for sig, name, sensitive, hint in _WEB_APP_SIGNATURES:
+        if sig in low:
+            return name, sensitive, hint
+    return None
+
+
 def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     scheme = "https" if svc.port in (443, 8443) else "http"
     label = _host_label(cfg)
@@ -190,7 +228,22 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     if _have(cfg, "whatweb"):
         rc, ww, _ = run(["whatweb", "--color=never", base], timeout=120)
         if ww.strip():
-            out.append(EnumFinding(svc.port, "whatweb", "fingerprint captured", ww.strip()[:2000]))
+            # Pull the real server product+version (nmap often mislabels web ports —
+            # e.g. 'webdav' for a lighttpd box); these tags let the exploit phase
+            # query Exploit-DB on the actual software instead of nmap's guess (#2).
+            prod, ver = _parse_whatweb_server(ww)
+            wtags = {"http_product": prod, "http_version": ver} if prod else {}
+            summary = "fingerprint captured" + (f": {prod} {ver}".rstrip() if prod else "")
+            out.append(EnumFinding(svc.port, "whatweb", summary, ww.strip()[:2000], tags=wtags))
+            # Known-app fingerprint → the actual attack surface (admin panel, default
+            # creds, app CVEs) instead of just a stack list (#3).
+            app = _identify_web_app(ww)
+            if app:
+                name, sensitive, hint = app
+                atags = {"app": name, "app_url": base}
+                if sensitive:
+                    atags["web_panel"] = True
+                out.append(EnumFinding(svc.port, "web-app", f"{name} detected", hint, tags=atags))
             low = ww.lower()
             for c in ("wordpress", "drupal", "joomla"):
                 if c in low:
