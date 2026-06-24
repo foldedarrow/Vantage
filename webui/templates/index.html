@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}ctfauto — targets{% endblock %}
+{% block content %}
+
+{% if sweeps %}
+<h2>CIDR sweeps</h2>
+<div class="grid">
+  {% for s in sweeps %}
+  <div class="card">
+    <h3><a href="/sweep/{{ s.slug }}">{{ s.slug }}</a></h3>
+    <div class="meta">sweep index</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h2>Targets</h2>
+{% if targets %}
+<div class="grid">
+  {% for t in targets %}
+  <div class="card">
+    <h3><a href="/report/{{ t.slug }}">{{ t.target }}</a></h3>
+    <div class="meta">
+      {% if t.klass %}<span class="pill {{ t.klass }}">{{ t.klass }}</span>{% endif %}
+      {% if t.profile %}<span>{{ t.profile }}</span>{% endif %}
+      {% if t.generated %}<span>{{ t.generated }}</span>{% endif %}
+    </div>
+    <div class="stats">
+      <div><div class="n">{{ t.n_services }}</div><div class="l">services</div></div>
+      <div><div class="n">{{ t.n_findings }}</div><div class="l">findings</div></div>
+      <div><div class="n">{{ t.n_candidates }}</div><div class="l">candidates</div></div>
+    </div>
+    {% if t.top_leads %}
+    <ol class="leads">
+      {% for lead in t.top_leads %}<li>{{ lead|safe }}</li>{% endfor %}
+    </ol>
+    {% else %}
+    <div class="muted">No priority leads.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  No reports found in <code>{{ loot }}</code>.<br>
+  Run ctfauto first (e.g. <code>python run.py 192.168.56.101</code>), or point the
+  dashboard at the right loot dir with <code>--loot</code> / <code>$CTFAUTO_LOOT</code>.
+</div>
+{% endif %}
+
+{% endblock %}

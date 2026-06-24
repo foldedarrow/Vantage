@@ -80,6 +80,7 @@ def write_reports(cfg: RunConfig, host: HostResult,
     data = {
         "target": cfg.target,
         "hostname": cfg.hostname,
+        "classification": getattr(cfg, "klass", ""),
         "profile": cfg.profile.name,
         "generated": datetime.now().isoformat(timespec="seconds"),
         "aggressive": cfg.aggressive,

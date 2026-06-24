@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}ctfauto — {{ meta.target }}{% endblock %}
+{% block content %}
+
+<p class="back"><a href="/">&larr; all targets</a></p>
+<h1 style="font-family:ui-monospace,monospace">{{ meta.target }}</h1>
+<div class="meta">
+  {% if meta.klass %}<span class="pill {{ meta.klass }}">{{ meta.klass }}</span>{% endif %}
+  {% if meta.profile %}<span>{{ meta.profile }}</span>{% endif %}
+  {% if meta.generated %}<span>{{ meta.generated }}</span>{% endif %}
+  <span>{{ meta.n_services }} services · {{ meta.n_findings }} findings · {{ meta.n_candidates }} candidates</span>
+</div>
+
+{% if leads %}
+<div class="leadbox">
+  <strong>Priority leads</strong> — ranked highest-signal first
+  <ol class="leads">
+    {% for lead in leads %}<li>{{ lead|safe }}</li>{% endfor %}
+  </ol>
+</div>
+{% endif %}
+
+<div class="report">{{ report_html|safe }}</div>
+
+{% if events %}
+<h2>Run timeline</h2>
+<div class="timeline">
+  {% for e in events %}
+  <div class="ev">
+    <span class="ts">{{ e.ts }}</span>
+    <span class="kind">{{ e.event }}</span>
+    <span class="muted">{% for k, v in e.items() if k not in ('ts','event') %}{{ k }}={{ v }} {% endfor %}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
