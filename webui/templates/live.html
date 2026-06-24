@@ -4,6 +4,13 @@
 <p class="back"><a href="/">&larr; all targets</a></p>
 <h1 style="font-family:ui-monospace,monospace">{{ slug }} <span class="live-dot">●</span></h1>
 
+<div style="margin-bottom:12px">
+  <form id="stopform" method="post" action="/scan/{{ slug }}/stop"
+        style="display:{{ 'inline' if can_stop else 'none' }}">
+    <button type="submit" class="stopbtn">■ stop scan</button>
+  </form>
+</div>
+
 <div id="activity" class="leadbox" style="border-left-color:var(--green)">…loading…</div>
 
 <h2>Activity log</h2>
@@ -25,6 +32,7 @@ async function tick() {
   try { d = await (await fetch(`/api/events/${encodeURIComponent(slug)}`)).json(); }
   catch (_) { return; }
   const st = d.status || {};
+  document.getElementById('stopform').style.display = d.can_stop ? 'inline' : 'none';
   if (st.done) {
     activity.innerHTML = '✓ <b>scan complete</b> — <a href="/report/' + encodeURIComponent(slug) + '">open the report →</a>';
     render(d.events);

@@ -15,13 +15,16 @@ Then open http://127.0.0.1:5000. Point it at a loot dir with $CTFAUTO_LOOT or
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
+import signal
+import subprocess
 import sys
 import time
 
-from flask import Flask, abort, render_template, jsonify
+from flask import Flask, abort, render_template, jsonify, request, redirect, url_for
 import markdown as md
 
 # Make the ctfauto package importable so we reuse its canonical lead-ranking
@@ -33,6 +36,10 @@ from ctfauto.modules.report import _priority_leads  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 app = Flask(__name__)
+
+_RUN_PY = os.path.join(_REPO_ROOT, "run.py")
+# slug -> Popen for scans launched from the GUI (so we can stop them).
+_procs: dict = {}
 
 # A loot slug is the filesystem-safe target token (target with '/' -> '_'); it is
 # validated against this charset AND must resolve inside the loot dir (no traversal).
@@ -247,15 +254,22 @@ def index():
                            stopped=list_stopped(), loot=loot_dir())
 
 
+def _proc_alive(slug: str) -> bool:
+    p = _procs.get(slug)
+    return bool(p and p.poll() is None)
+
+
 @app.route("/live/<slug>")
 def live(slug: str):
     if not _SLUG_RE.match(slug):
         abort(404)
     events = load_events(slug)
-    if not events:
+    # A scan we just launched may not have written its log yet — don't 404 it.
+    if not events and not _proc_alive(slug):
         abort(404)
     return render_template("live.html", slug=slug, events=events,
-                           status=_scan_status(events, _events_age(slug)))
+                           status=_scan_status(events, _events_age(slug)),
+                           can_stop=_proc_alive(slug))
 
 
 @app.route("/report/<slug>")
@@ -286,7 +300,135 @@ def api_events(slug: str):
     """JSON event feed the live view polls: the full event list plus derived
     status (running / current command / done)."""
     events = load_events(slug)
-    return jsonify({"events": events, "status": _scan_status(events, _events_age(slug))})
+    return jsonify({"events": events, "can_stop": _proc_alive(slug),
+                    "status": _scan_status(events, _events_age(slug))})
+
+
+# --- launching scans from the GUI (localhost only) --------------------------
+# The form maps 1:1 onto run.py flags. We build an ARGV (never a shell string) and
+# invoke the real CLI, so its authorization gate / scope file / external-refusal
+# still apply. Booleans -> presence flags; valued fields are validated.
+_BOOL_FLAGS = {
+    "aggressive": "--aggressive", "cloud": "--cloud", "allow_cloud": "--allow-cloud",
+    "no_udp": "--no-udp", "no_nse_vuln": "--no-nse-vuln", "resume": "--resume",
+    "connect": "--connect", "no_fragment": "--no-fragment", "add_hosts": "--add-hosts",
+}
+# (form field, flag, kind) — kind validates the value.
+_VALUE_FIELDS = [
+    ("max_time", "--max-time", "int"), ("parallelism", "--parallelism", "int"),
+    ("max_rate", "--max-rate", "int"), ("source_port", "--source-port", "int"),
+    ("scan_delay", "--scan-delay", "token"), ("decoys", "--decoys", "token"),
+    ("hostname", "--hostname", "token"), ("cloud_name", "--cloud-name", "token"),
+    ("scope_file", "--scope-file", "path"),
+]
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9.\-_:,/ ]+$")   # no shell metacharacters
+
+
+def _is_localhost() -> bool:
+    return (request.remote_addr or "") in ("127.0.0.1", "::1", "localhost")
+
+
+def _valid_target(t: str) -> bool:
+    t = t.strip()
+    if not t or len(t) > 255:
+        return False
+    try:
+        ipaddress.ip_network(t, strict=False)   # IP or CIDR
+        return True
+    except ValueError:
+        pass
+    return bool(re.match(r"^[A-Za-z0-9.\-]+$", t))   # hostname
+
+
+def _build_argv(form) -> tuple[list, str]:
+    """Build the run.py argv from the submitted form. Raises ValueError on bad input."""
+    target = (form.get("target") or "").strip()
+    if not _valid_target(target):
+        raise ValueError("Enter a valid IP, hostname, or CIDR.")
+    argv = [sys.executable, _RUN_PY, target, "--out-dir", loot_dir()]
+
+    profile = form.get("profile", "auto")
+    if profile == "stealth":
+        argv.append("--stealth")
+    elif profile in ("lab", "gentle"):
+        argv += ["--profile", profile]
+
+    # The GUI can't answer the interactive prompt, so 'authorized' -> --yes. The
+    # checkbox is required (enforced client- and server-side).
+    if not form.get("authorized"):
+        raise ValueError("You must confirm you're authorized to test this target.")
+    argv.append("--yes")
+    if form.get("allow_external"):
+        argv.append("--allow-external")
+
+    for field, flag in _BOOL_FLAGS.items():
+        if form.get(field):
+            argv.append(flag)
+
+    for field, flag, kind in _VALUE_FIELDS:
+        v = (form.get(field) or "").strip()
+        if not v:
+            continue
+        if kind == "int":
+            if not v.isdigit():
+                raise ValueError(f"{field.replace('_', ' ')} must be a number.")
+            argv += [flag, v]
+        elif kind == "token":
+            if not _TOKEN_RE.match(v):
+                raise ValueError(f"Invalid characters in {field.replace('_', ' ')}.")
+            argv += [flag, v]
+        elif kind == "path":
+            argv += [flag, v]
+    return argv, target
+
+
+def _spawn_scan(argv: list, slug: str) -> None:
+    log_path = os.path.join(loot_dir(), f"webrun_{slug}.log")
+    os.makedirs(loot_dir(), exist_ok=True)
+    logf = open(log_path, "ab")
+    # start_new_session so we can signal the whole tool tree (nmap children) on stop.
+    p = subprocess.Popen(argv, cwd=_REPO_ROOT, stdout=logf, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    _procs[slug] = p
+
+
+@app.route("/scan", methods=["GET", "POST"])
+def scan():
+    if not _is_localhost():
+        abort(403)
+    if request.method == "POST":
+        try:
+            argv, target = _build_argv(request.form)
+        except ValueError as e:
+            return render_template("scan.html", error=str(e), form=request.form,
+                                   is_root=_is_root(), loot=loot_dir()), 400
+        slug = target.replace("/", "_")
+        _spawn_scan(argv, slug)
+        return redirect(url_for("live", slug=slug))
+    return render_template("scan.html", error=None, form={}, is_root=_is_root(),
+                           loot=loot_dir())
+
+
+@app.route("/scan/<slug>/stop", methods=["POST"])
+def scan_stop(slug: str):
+    if not _is_localhost():
+        abort(403)
+    if not _SLUG_RE.match(slug):
+        abort(404)
+    p = _procs.get(slug)
+    if p and p.poll() is None:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGINT)   # Ctrl-C the whole group
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    return redirect(url_for("live", slug=slug))
+
+
+def _is_root() -> bool:
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
 
 
 def main(argv=None):

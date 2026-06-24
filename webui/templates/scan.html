@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}ctfauto — new scan{% endblock %}
+{% block content %}
+<p class="back"><a href="/">&larr; dashboard</a></p>
+<h1>New scan</h1>
+
+{% if not is_root %}
+<div class="leadbox" style="border-left-color:var(--yellow)">
+  ⚠ The dashboard is running <b>unprivileged</b>. nmap will fall back to a connect
+  scan; OS detection (<code>-O</code>), SYN scan, and stealth fragmentation need root.
+  For full capability, restart it with <code>sudo</code>.
+</div>
+{% endif %}
+
+{% if error %}<div class="leadbox" style="border-left-color:var(--red)">✗ {{ error }}</div>{% endif %}
+
+<form method="post" action="/scan" class="report" style="padding:20px 24px">
+  <label class="f">Target <span class="muted">(IP, hostname, or CIDR)</span>
+    <input name="target" required placeholder="192.168.4.2  /  box.htb  /  10.0.0.0/24"
+           value="{{ form.get('target','') }}">
+  </label>
+
+  <label class="f">Profile
+    <select name="profile">
+      <option value="auto">auto — pick by target (HTB→gentle, RFC1918→lab)</option>
+      <option value="lab">lab — loud &amp; thorough (owned VMs)</option>
+      <option value="gentle">gentle — quiet (HTB / shared infra)</option>
+      <option value="stealth">stealth — low-and-slow, evasive</option>
+    </select>
+  </label>
+
+  <fieldset><legend>Options</legend>
+    <label class="c"><input type="checkbox" name="aggressive"> Aggressive (loudest enum)</label>
+    <label class="c"><input type="checkbox" name="connect"> Connect scan (-sT, no root needed)</label>
+    <label class="c"><input type="checkbox" name="no_udp"> No UDP scan</label>
+    <label class="c"><input type="checkbox" name="no_nse_vuln"> No NSE vuln scripts</label>
+    <label class="c"><input type="checkbox" name="resume"> Resume cached state</label>
+    <label class="c"><input type="checkbox" name="add_hosts"> Add .htb host to /etc/hosts</label>
+  </fieldset>
+
+  <fieldset><legend>Stealth knobs <span class="muted">(used with the stealth profile)</span></legend>
+    <label class="f">Source port <input name="source_port" placeholder="53"></label>
+    <label class="f">Decoys <input name="decoys" placeholder="RND:5  or  ip1,ip2,ME"></label>
+    <label class="f">Scan delay <input name="scan_delay" placeholder="500ms"></label>
+    <label class="f">Max rate (pps) <input name="max_rate" placeholder="50"></label>
+    <label class="c"><input type="checkbox" name="no_fragment"> No packet fragmentation</label>
+  </fieldset>
+
+  <fieldset><legend>Cloud recon</legend>
+    <label class="c"><input type="checkbox" name="cloud"> Enable cloud recon</label>
+    <label class="c"><input type="checkbox" name="allow_cloud"> Authorize cloud enumeration</label>
+    <label class="f">Cloud seed (keyword/domain) <input name="cloud_name" placeholder="acme  /  acme.com"></label>
+  </fieldset>
+
+  <fieldset><legend>Advanced</legend>
+    <label class="f">Max time (s) <input name="max_time" placeholder="0 = unlimited"></label>
+    <label class="f">Parallelism <input name="parallelism" placeholder="auto"></label>
+    <label class="f">Hostname override <input name="hostname" placeholder="box.htb"></label>
+    <label class="f">Scope file <input name="scope_file" placeholder="/path/to/scope.txt"></label>
+  </fieldset>
+
+  <fieldset style="border-color:var(--yellow)"><legend>Authorization</legend>
+    <label class="c"><input type="checkbox" name="authorized" required>
+      I own or am explicitly authorized to test this target.</label>
+    <label class="c"><input type="checkbox" name="allow_external">
+      Authorize an <b>external / public</b> target (required for non-RFC1918/HTB IPs).</label>
+  </fieldset>
+
+  <button type="submit" class="btn">▶ Start scan</button>
+</form>
+
+<style>
+  .report .f { display:block; margin:10px 0; }
+  .report .f input, .report .f select { display:block; width:100%; margin-top:4px;
+    background:#0b0f14; border:1px solid var(--border); color:var(--fg);
+    border-radius:6px; padding:8px 10px; font-family:var(--mono); font-size:13px; }
+  .report fieldset { border:1px solid var(--border); border-radius:8px; margin:16px 0; padding:10px 14px; }
+  .report legend { color:var(--muted); padding:0 6px; }
+  .report .c { display:block; margin:7px 0; cursor:pointer; }
+  .report .c input { margin-right:8px; }
+  .btn { background:var(--green); color:#06250f; border:0; border-radius:8px;
+    padding:11px 20px; font-weight:700; font-size:14px; cursor:pointer; margin-top:8px; }
+  .btn:hover { filter:brightness(1.1); }
+</style>
+{% endblock %}
