@@ -61,7 +61,7 @@
   </div>
   {% endfor %}
 </div>
-{% elif not live %}
+{% elif not live and not stopped %}
 <div class="empty">
   No reports found in <code>{{ loot }}</code>.<br>
   Run ctfauto first (e.g. <code>python run.py 192.168.56.101</code>), or point the
@@ -69,9 +69,27 @@
 </div>
 {% endif %}
 
+{% if stopped %}
+<h2 class="muted">Stopped / incomplete</h2>
+<div class="grid">
+  {% for s in stopped %}
+  <div class="card" style="opacity:.6">
+    <h3>{{ s.slug }} <span class="muted">○ stopped</span></h3>
+    <div class="meta">
+      <span>last: {{ s.status.phase or s.last }}</span>
+      <span>{{ s.status.n_events }} events</span>
+      {% if s.status.age is not none %}<span>idle {{ s.status.age }}s</span>{% endif %}
+    </div>
+    <div class="muted" style="font-size:12px">Run didn't finish (Ctrl-C / killed). No report written.</div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if live %}
 <script>
-  // A scan is in progress — refresh the dashboard so live cards update.
+  // A scan is genuinely live — refresh so the cards update. Stopped scans don't
+  // trigger this, so a killed run won't keep the page reloading forever.
   setTimeout(() => location.reload(), 5000);
 </script>
 {% endif %}

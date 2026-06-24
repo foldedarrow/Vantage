@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+import time
 
 from flask import Flask, abort, render_template, jsonify
 import markdown as md
@@ -38,6 +39,12 @@ app = Flask(__name__)
 _SLUG_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
 
 _MD_EXTENSIONS = ["tables", "fenced_code", "toc", "sane_lists"]
+
+# A scan whose event log hasn't been written to in this many seconds is treated as
+# dead/stopped, not live. A genuinely-running scan emits exec_start/exec_end and a
+# 30s heartbeat during long tools, so a live log is never quiet this long; a
+# Ctrl-C'd run stops writing and goes stale within the window.
+LIVE_STALE_SECONDS = 90
 
 
 def loot_dir() -> str:
@@ -162,10 +169,21 @@ def load_events(slug: str) -> list[dict]:
     return events
 
 
-def _scan_status(events: list[dict]) -> dict:
-    """Derive live status from the event stream: is a scan running, what command
-    is executing now, and is it finished. exec_start/exec_end (emitted by every
-    tool run) drive the 'current activity'; phase events drive progress."""
+def _events_age(slug: str) -> float | None:
+    """Seconds since the event log was last written, or None if it's missing."""
+    if not _SLUG_RE.match(slug):
+        return None
+    try:
+        return max(0.0, time.time() - os.path.getmtime(_safe_path(f"events_{slug}.ndjson")))
+    except OSError:
+        return None
+
+
+def _scan_status(events: list[dict], age: float | None = None) -> dict:
+    """Derive status from the event stream + how recently it was written.
+    A scan is LIVE only if it hasn't finished AND its log is still being written
+    (age under the stale threshold). A Ctrl-C'd/killed run stops writing, so it
+    goes stale and is reported as stopped — not live."""
     done = any(e.get("event") in ("run_done", "run_abort", "sweep_done") for e in events)
     active, last_start, phase = 0, None, ""
     for e in events:
@@ -177,18 +195,21 @@ def _scan_status(events: list[dict]) -> dict:
             active = max(0, active - 1)
         elif ev.endswith("_done") or ev.endswith("_start"):
             phase = ev
-    running = active > 0 and not done
+    stale = age is not None and age > LIVE_STALE_SECONDS
+    live = (not done) and (not stale)
+    running = live and active > 0
     current = None
     if running and last_start:
         current = {"tool": last_start.get("tool", ""), "cmd": last_start.get("cmd", ""),
                    "ts": last_start.get("ts", "")}
-    return {"running": running, "done": done, "current": current,
-            "phase": phase, "n_events": len(events)}
+    return {"live": live, "running": running, "done": done, "stale": stale,
+            "current": current, "phase": phase, "n_events": len(events),
+            "age": None if age is None else round(age)}
 
 
-def list_live() -> list[dict]:
-    """Scans with an event log that hasn't finished yet — i.e. running right now
-    (report_*.json may not exist until the final phase)."""
+def _list_inprogress() -> list[dict]:
+    """All scans with an event log that hasn't reached a terminal event, each with
+    age-aware status so the caller can split genuinely-live from stopped/stale."""
     root = loot_dir()
     out = []
     if not os.path.isdir(root):
@@ -200,7 +221,7 @@ def list_live() -> list[dict]:
         events = load_events(slug)
         if not events:
             continue
-        status = _scan_status(events)
+        status = _scan_status(events, _events_age(slug))
         if status["done"]:
             continue            # finished -> shown under Targets
         out.append({"slug": slug, "status": status,
@@ -208,11 +229,22 @@ def list_live() -> list[dict]:
     return out
 
 
+def list_live() -> list[dict]:
+    """Only the genuinely-running scans (log still being written)."""
+    return [s for s in _list_inprogress() if s["status"]["live"]]
+
+
+def list_stopped() -> list[dict]:
+    """Started-but-stopped scans (e.g. Ctrl-C'd) — incomplete and no longer live."""
+    return [s for s in _list_inprogress() if not s["status"]["live"]]
+
+
 # --- routes ------------------------------------------------------------------
 @app.route("/")
 def index():
     return render_template("index.html", targets=list_targets(),
-                           sweeps=list_sweeps(), live=list_live(), loot=loot_dir())
+                           sweeps=list_sweeps(), live=list_live(),
+                           stopped=list_stopped(), loot=loot_dir())
 
 
 @app.route("/live/<slug>")
@@ -223,7 +255,7 @@ def live(slug: str):
     if not events:
         abort(404)
     return render_template("live.html", slug=slug, events=events,
-                           status=_scan_status(events))
+                           status=_scan_status(events, _events_age(slug)))
 
 
 @app.route("/report/<slug>")
@@ -254,7 +286,7 @@ def api_events(slug: str):
     """JSON event feed the live view polls: the full event list plus derived
     status (running / current command / done)."""
     events = load_events(slug)
-    return jsonify({"events": events, "status": _scan_status(events)})
+    return jsonify({"events": events, "status": _scan_status(events, _events_age(slug))})
 
 
 def main(argv=None):

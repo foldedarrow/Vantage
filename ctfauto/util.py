@@ -162,6 +162,9 @@ class _Heartbeat:
         while not self._stop.wait(self.interval):
             waited += self.interval
             info(f"  …still running {self.label} ({int(waited)}s)")
+            # Keep the event log 'warm' so the web dashboard can tell a slow-but-
+            # alive tool (a long nmap) from a dead/killed run that stops writing.
+            _log_event("exec_heartbeat", tool=self.label, waited=int(waited))
 
     def __enter__(self):
         self._t.start()

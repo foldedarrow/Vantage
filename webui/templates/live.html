@@ -31,6 +31,13 @@ async function tick() {
     clearInterval(timer);
     return;
   }
+  if (!st.live) {   // stopped: log went quiet (Ctrl-C / killed)
+    activity.innerHTML = '○ <b>scan stopped</b> <span class="muted">(no activity for '
+      + (st.age != null ? st.age + 's' : 'a while') + ' — Ctrl-C or killed; no report written)</span>';
+    render(d.events);
+    clearInterval(timer);
+    return;
+  }
   if (st.running && st.current) {
     activity.innerHTML = '▶ running <b>' + st.current.tool + '</b> '
       + '<span class="live-dot">●</span><br>'
