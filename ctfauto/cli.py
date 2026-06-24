@@ -46,7 +46,8 @@ _INSTALL_HINTS = {
     # cloud recon (all optional — module has a stdlib HTTP fallback)
     "aws": "apt install awscli   # or: pipx install awscli",
     "s3scanner": "pipx install s3scanner",
-    "cloud_enum": "pipx install cloud_enum",
+    # cloud_enum is NOT on PyPI — it's a GitHub project; install from the repo.
+    "cloud_enum": "pipx install git+https://github.com/initstring/cloud_enum   # not on PyPI",
 }
 
 
