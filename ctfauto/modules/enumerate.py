@@ -136,10 +136,21 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
             _enum_snmp(cfg, svc, local)
         elif name == "ssh" or svc.port == 22:
             local.append(EnumFinding(svc.port, "recon", f"SSH: {svc.banner or 'version unknown'}"))
+        elif name in ("ldap", "ldaps") or svc.port in (389, 636):
+            _enum_ldap(cfg, svc, local)
+        elif svc.port == 2375 or (svc.port == 2376 and "docker" in name):
+            _enum_docker_api(cfg, svc, local)
+        elif name in ("elasticsearch",) or svc.port == 9200 or "elasticsearch" in svc.banner.lower():
+            _enum_elasticsearch(cfg, svc, local)
+        elif name in ("ms-wbt-server", "rdp") or svc.port == 3389:
+            local.append(EnumFinding(svc.port, "recon", f"RDP exposed: {svc.banner or 'service up'} "
+                                     "— check NLA / CredSSP (CVE-2019-0708 BlueKeep on legacy)"))
+        elif name in ("wsman",) or svc.port in (5985, 5986):
+            local.append(EnumFinding(svc.port, "recon", f"WinRM exposed: {svc.banner or 'service up'} "
+                                     "— try evil-winrm with valid creds"))
         elif name in ("mysql", "ms-sql-s", "postgresql", "mongodb", "redis") or \
                 svc.port in (3306, 1433, 5432, 27017, 6379):
-            local.append(EnumFinding(svc.port, "recon", f"DB/cache exposed: {svc.name} {svc.banner}",
-                                     tags={"db": svc.name}))
+            _enum_dbcache(cfg, svc, local)
         return local
 
     # Run handlers concurrently; each returns its own findings, merged after.
@@ -207,6 +218,20 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                     out.append(EnumFinding(svc.port, "http-quickwin",
                                            f"/{path} -> HTTP {code}",
                                            tags={"path": path}))
+
+    # 2b. API / Swagger surface discovery (read-only GETs of well-known endpoints).
+    #     An exposed schema/Swagger UI maps the whole API attack surface.
+    if _have(cfg, "curl", quiet=True):
+        for path in ("swagger.json", "openapi.json", "api-docs", "v2/api-docs",
+                     "swagger-ui.html", "graphql", "api", "actuator", "actuator/env"):
+            rc, body, _ = run(["curl", "-sk", "--max-time", "10",
+                               f"{base}/{path}"], timeout=15)
+            low = body.lower()
+            if any(k in low for k in ('"swagger"', '"openapi"', '"paths"',
+                                      "swagger-ui", '"__schema"', '"_links"', '"activeprofiles"')):
+                out.append(EnumFinding(svc.port, "api-discovery",
+                                       f"/{path} -> API schema/endpoint exposed",
+                                       body.strip()[:1200], tags={"api_path": path}))
 
     # 3. Nikto — loud; only when the profile allows it (off on gentle/HTB, #14)
     if cfg.profile.enable_nikto and _have(cfg, "nikto"):
@@ -443,3 +468,83 @@ def _enum_snmp(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         rc, sc, _ = run(["snmp-check", cfg.target], timeout=120)
         if rc == 0 and sc.strip():
             out.append(EnumFinding(svc.port, "snmp-check", "SNMP details", sc.strip()[:2500]))
+
+
+# --- DB / cache --------------------------------------------------------------
+def _enum_dbcache(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Record the exposed datastore, then probe the unauthenticated ones (Redis,
+    Elasticsearch) read-only. These are classic 'open by default' wins on labs."""
+    out.append(EnumFinding(svc.port, "recon", f"DB/cache exposed: {svc.name} {svc.banner}",
+                           tags={"db": svc.name}))
+    name = svc.name.lower()
+    if name == "redis" or svc.port == 6379:
+        _probe_redis(cfg, svc, out)
+
+
+def _probe_redis(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Unauthenticated Redis check via a raw socket (no redis-cli needed). Sends
+    PING; a +PONG means no auth is required → read/write access to the keyspace."""
+    import socket
+    try:
+        with socket.create_connection((cfg.target, svc.port), timeout=8) as s:
+            s.sendall(b"PING\r\n")
+            resp = s.recv(256).decode("utf-8", "ignore")
+            if "PONG" in resp:
+                s.sendall(b"INFO server\r\n")
+                info_resp = s.recv(4096).decode("utf-8", "ignore")
+                ver = next((l.split(":", 1)[1].strip() for l in info_resp.splitlines()
+                            if l.startswith("redis_version:")), "?")
+                out.append(EnumFinding(svc.port, "redis",
+                                       f"UNAUTHENTICATED Redis access (no auth) — v{ver}",
+                                       info_resp[:1500], tags={"unauth_redis": True}))
+            elif "NOAUTH" in resp:
+                out.append(EnumFinding(svc.port, "redis",
+                                       "Redis requires authentication (NOAUTH)", resp[:200]))
+    except OSError:
+        pass
+
+
+def _enum_elasticsearch(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Unauthenticated Elasticsearch over HTTP — read-only checks for the cluster
+    banner and index listing (often exposes whole datasets on labs)."""
+    if not _have(cfg, "curl", quiet=True):
+        return
+    base = f"http://{cfg.target}:{svc.port}"
+    rc, root, _ = run(["curl", "-sk", "--max-time", "10", f"{base}/"], timeout=15)
+    if '"cluster_name"' in root or '"lucene_version"' in root:
+        rc, idx, _ = run(["curl", "-sk", "--max-time", "10", f"{base}/_cat/indices?v"], timeout=15)
+        out.append(EnumFinding(svc.port, "elasticsearch",
+                               "UNAUTHENTICATED Elasticsearch access",
+                               (root + "\n\n" + idx)[:1800], tags={"unauth_es": True}))
+
+
+# --- LDAP --------------------------------------------------------------------
+def _enum_ldap(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Anonymous LDAP bind: read the root DSE for naming contexts (domain layout).
+    Anonymous read of namingContexts is a common AD/LDAP misconfiguration."""
+    if not _have(cfg, "ldapsearch", quiet=True):
+        return
+    scheme = "ldaps" if svc.port == 636 else "ldap"
+    rc, ls, _ = run(["ldapsearch", "-x", "-H", f"{scheme}://{cfg.target}:{svc.port}",
+                     "-s", "base", "-b", "", "namingContexts", "defaultNamingContext"],
+                    timeout=45)
+    contexts = [l for l in ls.splitlines() if l.lower().startswith("namingcontexts:")
+                or l.lower().startswith("defaultnamingcontext:")]
+    if contexts:
+        out.append(EnumFinding(svc.port, "ldapsearch",
+                               "anonymous LDAP bind — root DSE readable",
+                               "\n".join(contexts)[:1500], tags={"anon_ldap": True}))
+
+
+# --- Docker API --------------------------------------------------------------
+def _enum_docker_api(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Unauthenticated Docker Engine API (2375) = full host compromise (run a
+    privileged container, mount /). Read-only check of /version here."""
+    if not _have(cfg, "curl", quiet=True):
+        return
+    rc, ver, _ = run(["curl", "-sk", "--max-time", "10",
+                      f"http://{cfg.target}:{svc.port}/version"], timeout=15)
+    if '"ApiVersion"' in ver or '"Version"' in ver:
+        out.append(EnumFinding(svc.port, "docker-api",
+                               "UNAUTHENTICATED Docker Engine API — host takeover risk",
+                               ver[:1200], tags={"unauth_docker": True}))

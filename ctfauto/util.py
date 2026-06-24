@@ -194,31 +194,6 @@ def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, 
             hb.__exit__()
 
 
-def local_ip_for(target: str) -> str:
-    """Best-effort: the local source IP the kernel would use to reach `target`.
-    This is the LHOST a reverse payload must call back to. Returns '' on failure
-    (caller should then prefer a bind payload, which needs no LHOST)."""
-    import socket as _socket
-    # strip a CIDR suffix if present
-    host = target.split("/")[0].strip()
-    if not host:
-        return ""
-    try:
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        try:
-            # no packets are actually sent for a UDP connect; it just selects a route
-            s.connect((host, 9))
-            return s.getsockname()[0]
-        finally:
-            s.close()
-    except OSError:
-        # fall back to the primary interface address
-        try:
-            return _socket.gethostbyname(_socket.gethostname())
-        except OSError:
-            return ""
-
-
 def parallel_map(fn, items, workers: int = 4):
     """Run fn over items concurrently; return results in completion order.
     Exceptions in a worker are caught and surfaced as warnings, not fatal."""

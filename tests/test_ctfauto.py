@@ -747,5 +747,151 @@ class TestSoft404Guard(unittest.TestCase):
         self.assertFalse([f for f in out if f.tool == "http-quickwin"])
 
 
+class TestScanFlags(unittest.TestCase):
+    """-Pn for single hosts (firewalled boxes), not for CIDR; --min-rate lab-only."""
+    def test_pn_for_single_host(self):
+        cfg = RunConfig(target="10.10.10.5", profile=Profile.gentle())
+        self.assertIn("-Pn", R._discovery_perf_flags(cfg))
+
+    def test_no_pn_for_cidr(self):
+        cfg = RunConfig(target="10.10.10.0/24", profile=Profile.gentle())
+        self.assertNotIn("-Pn", R._discovery_perf_flags(cfg))
+
+    def test_min_rate_lab_only(self):
+        lab = RunConfig(target="192.168.56.5", profile=Profile.lab())
+        gentle = RunConfig(target="10.10.10.5", profile=Profile.gentle())
+        self.assertIn("--min-rate", R._discovery_perf_flags(lab))
+        self.assertNotIn("--min-rate", R._discovery_perf_flags(gentle))
+
+    def test_max_retries_always(self):
+        cfg = RunConfig(target="10.10.10.5", profile=Profile.gentle())
+        self.assertIn("--max-retries", R._discovery_perf_flags(cfg))
+
+
+class TestCidrClassify(unittest.TestCase):
+    def test_htb_cidr(self):
+        self.assertEqual(classify_target("10.10.0.0/16"), "htb")
+
+    def test_lab_cidr(self):
+        self.assertEqual(classify_target("192.168.56.0/24"), "lab")
+
+    def test_is_cidr(self):
+        self.assertTrue(R.is_cidr("10.0.0.0/24"))
+        self.assertFalse(R.is_cidr("10.0.0.5"))
+
+
+class TestScopeAllowlist(unittest.TestCase):
+    def setUp(self):
+        self.f = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt")
+        self.f.write("# engagement scope\n10.0.0.0/24\nbox.htb\n203.0.113.7\n")
+        self.f.close()
+
+    def test_in_scope_cidr(self):
+        from ctfauto.config import load_scope, target_in_scope
+        scope = load_scope(self.f.name)
+        self.assertTrue(target_in_scope("10.0.0.50", scope))
+
+    def test_out_of_scope_refused(self):
+        from ctfauto.config import load_scope, target_in_scope
+        scope = load_scope(self.f.name)
+        self.assertFalse(target_in_scope("10.0.1.50", scope))
+
+    def test_hostname_in_scope(self):
+        from ctfauto.config import load_scope, target_in_scope
+        scope = load_scope(self.f.name)
+        self.assertTrue(target_in_scope("box.htb", scope))
+
+    def test_empty_scope_allows_all(self):
+        from ctfauto.config import target_in_scope
+        self.assertTrue(target_in_scope("8.8.8.8", []))
+
+
+class TestPriorityLeads(unittest.TestCase):
+    def test_rce_ranks_above_creds(self):
+        host = R.HostResult(ip="10.0.0.1")
+        host.nse_cves = ["CVE-2011-2523"]
+        enum = EN.EnumResult()
+        enum.findings.append(EN.EnumFinding(21, "ftp", "anon", tags={"anon_ftp": True}))
+        enum.findings.append(EN.EnumFinding(6379, "redis", "open", tags={"unauth_redis": True}))
+        exp = E.ExploitResult()
+        exp.candidates.append(E.ExploitCandidate(
+            21, "vsftpd backdoor", "x",
+            msf_module="exploit/unix/ftp/vsftpd_234_backdoor", high_confidence=True))
+        leads = RP._priority_leads(host, enum, exp)
+        self.assertTrue(leads)
+        self.assertIn("RCE", leads[0])  # high-confidence RCE first
+        self.assertTrue(any("Redis" in l for l in leads))
+        self.assertTrue(any("anonymous FTP" in l for l in leads))
+
+
+class TestUnauthServiceProbes(unittest.TestCase):
+    class _FakeSock:
+        def __init__(self, responses):
+            self._r = list(responses)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def sendall(self, data): pass
+        def recv(self, n): return self._r.pop(0) if self._r else b""
+
+    def test_redis_unauth_detected(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab())
+        out = []
+        fake = self._FakeSock([b"+PONG\r\n", b"redis_version:7.0.5\r\nrole:master\r\n"])
+        with mock.patch("socket.create_connection", return_value=fake):
+            EN._probe_redis(cfg, _svc(6379, "redis"), out)
+        self.assertTrue(any(f.tags.get("unauth_redis") for f in out), [f.summary for f in out])
+
+    def test_redis_noauth_not_flagged_unauth(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab())
+        out = []
+        fake = self._FakeSock([b"-NOAUTH Authentication required.\r\n"])
+        with mock.patch("socket.create_connection", return_value=fake):
+            EN._probe_redis(cfg, _svc(6379, "redis"), out)
+        self.assertFalse(any(f.tags.get("unauth_redis") for f in out))
+
+    def test_elasticsearch_unauth(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab(),
+                        discovered_tools={"curl": "/usr/bin/curl"})
+        out = []
+        body = '{"cluster_name":"es","version":{"lucene_version":"9.0"}}'
+        with mock.patch.object(EN, "run", return_value=(0, body, "")):
+            EN._enum_elasticsearch(cfg, _svc(9200, "http"), out)
+        self.assertTrue(any(f.tags.get("unauth_es") for f in out))
+
+    def test_docker_api_unauth(self):
+        cfg = RunConfig(target="10.0.0.5", profile=Profile.lab(),
+                        discovered_tools={"curl": "/usr/bin/curl"})
+        out = []
+        with mock.patch.object(EN, "run", return_value=(0, '{"ApiVersion":"1.41"}', "")):
+            EN._enum_docker_api(cfg, _svc(2375, "docker"), out)
+        self.assertTrue(any(f.tags.get("unauth_docker") for f in out))
+
+    def test_ssti_listed_as_candidate_not_injected(self):
+        # SSTI is identified as an informational candidate (consistent with the
+        # report-only contract), NOT actively injected during enumeration.
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab())
+        er = EN.EnumResult()
+        er.findings.append(EN.EnumFinding(80, "param-url", "x",
+                                          tags={"param_url": "http://10.0.0.1/p.php?id=1"}))
+        cands = E._web_candidates(cfg, R.HostResult(ip="10.0.0.1"), er)
+        ssti = [c for c in cands if c.web_action == "ssti"]
+        self.assertEqual(len(ssti), 1)
+        self.assertTrue(ssti[0].command.startswith("#"))  # informational, not run
+        self.assertFalse(hasattr(EN, "_probe_ssti"))      # no active injector exists
+
+
+class TestSweepIndex(unittest.TestCase):
+    def test_index_written_and_ranked(self):
+        d = tempfile.mkdtemp()
+        rows = [{"ip": "10.0.0.1", "services": 2, "candidates": 0, "report": ""},
+                {"ip": "10.0.0.2", "services": 5, "candidates": 3,
+                 "report": os.path.join(d, "report_10.0.0.2.md")}]
+        path = RP.write_sweep_index(d, "10.0.0.0/24", rows)
+        self.assertTrue(os.path.exists(path))
+        body = open(path).read()
+        # the host with more candidates is ranked first
+        self.assertLess(body.index("10.0.0.2"), body.index("10.0.0.1"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

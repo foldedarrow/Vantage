@@ -44,6 +44,28 @@ def _xml_path(cfg: RunConfig) -> str:
     return os.path.join(cfg.out_dir, f"nmap_{cfg.target.replace('/', '_')}.xml")
 
 
+def is_cidr(target: str) -> bool:
+    """A CIDR/range target (e.g. 10.0.0.0/24) vs a single host."""
+    return "/" in target
+
+
+def _discovery_perf_flags(cfg: RunConfig) -> list[str]:
+    """Host-discovery + performance flags.
+
+    `-Pn` (skip ping) for a SINGLE host: firewalled HTB/external boxes commonly
+    drop ICMP, so without it nmap marks them 'down' and we get an empty report —
+    the target is already authorized, so discovery only risks a false negative.
+    For a CIDR we deliberately KEEP discovery so dead hosts are pruned from the
+    sweep. `--max-retries 2` stops slow-filtered ports stalling the run; lab gets
+    `--min-rate 1000` for speed (omitted on gentle/HTB to stay polite)."""
+    flags = ["--max-retries", "2"]
+    if not is_cidr(cfg.target):
+        flags.insert(0, "-Pn")
+    if cfg.profile.nmap_timing == "-T4":  # lab profile
+        flags += ["--min-rate", "1000"]
+    return flags
+
+
 def detect_htb_hostname(cfg: RunConfig) -> str:
     """Probe :80/:443 for a redirect or TLS cert revealing a *.htb hostname,
     common on HackTheBox. Returns the hostname if found, else ''."""
@@ -183,6 +205,7 @@ def scan(cfg: RunConfig) -> HostResult:
     cmd = [
         "nmap", cfg.profile.nmap_timing,
         *scan_type,
+        *_discovery_perf_flags(cfg),
         *cfg.profile.nmap_args.split(),
         *port_spec,
         "-oX", xml_out,
@@ -235,6 +258,22 @@ def scan(cfg: RunConfig) -> HostResult:
     except OSError:
         pass
     return host
+
+
+def discover_hosts(cfg: RunConfig) -> list[str]:
+    """Ping-sweep a CIDR/range (nmap -sn) and return the live host IPs. We KEEP
+    host discovery here (no -Pn) precisely so dead addresses are pruned — a /16
+    with -Pn would be 65k hosts. Hosts that block ping are missed; that's the
+    accepted trade for a bounded sweep."""
+    if not cfg.discovered_tools.get("nmap"):
+        warn("nmap not found on PATH — cannot discover hosts.")
+        return []
+    xml_out = os.path.join(cfg.out_dir, f"nmap_discover_{cfg.target.replace('/', '_')}.xml")
+    cmd = ["nmap", "-sn", cfg.profile.nmap_timing, "-oX", xml_out, cfg.target]
+    run(cmd, timeout=1800)
+    if not os.path.exists(xml_out):
+        return []
+    return [h.ip for h in parse_nmap_xml_all(xml_out) if h.ip]
 
 
 def _udp_scan(cfg: RunConfig) -> list[Service]:

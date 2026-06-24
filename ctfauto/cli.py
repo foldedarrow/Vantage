@@ -10,11 +10,12 @@ import sys
 from . import __version__
 from .config import (
     Profile, RunConfig, classify_target, detect_tools, OWN_VPN_HINT_NETWORKS,
+    load_scope, target_in_scope,
 )
 from .modules import recon, enumerate as enum_mod, exploit, report
 from .util import (
     banner, good, info, warn, err, C, events_init, event,
-    start_budget,
+    start_budget, budget_exceeded,
 )
 
 
@@ -33,6 +34,7 @@ _INSTALL_HINTS = {
     "snmpwalk": "apt install snmp",
     "snmp-check": "apt install snmp-check",
     "sslscan": "apt install sslscan",
+    "ldapsearch": "apt install ldap-utils",
     "wpscan": "gem install wpscan   # or: apt install wpscan",
     "droopescan": "pipx install droopescan",
     "showmount": "apt install nfs-common",
@@ -70,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "permission. On --profile auto you'll be prompted to choose the "
                         "gentle or full lab profile; pass --profile lab to opt into the "
                         "loud profile directly.")
+    p.add_argument("--scope-file", default="",
+                   help="Path to an engagement scope allowlist (CIDRs/IPs/hostnames, "
+                        "one per line, '#' comments). When set, ctfauto REFUSES any "
+                        "target not covered by the list — regardless of other flags. "
+                        "Also read from $CTFAUTO_SCOPE or ~/.config/ctfauto/scope.txt.")
     p.add_argument("--check", "--doctor", dest="check", action="store_true",
                    help="Print the tool/dependency matrix and install hints, then exit")
     p.add_argument("--wordlist-dirs", default="", help="gobuster/feroxbuster wordlist path")
@@ -252,6 +259,17 @@ def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -
             "Refusing to scan yourself.")
         return False
 
+    # Engagement scope allowlist (if configured) is authoritative: a target not in
+    # the list is refused regardless of class or --allow-external. This binds a run
+    # to a written scope so a typo'd/out-of-scope target can't be scanned.
+    scope = load_scope(cfg.scope_file)
+    if scope and not target_in_scope(cfg.target, scope):
+        err(f"{cfg.target} is NOT in the configured scope allowlist — refusing. "
+            "Add it to the scope file only if it's within your authorized engagement.")
+        return False
+    if scope:
+        good(f"{cfg.target} is within the configured engagement scope.")
+
     if klass == "htb":
         warn("HackTheBox shared-infra range. HTB rules prohibit aggressive/automated "
              "mass scanning; forcing the gentle profile and ignoring --aggressive.")
@@ -384,6 +402,7 @@ def build_config(args) -> RunConfig:
         seclists_dir=args.seclists_dir,
         klass=klass,
         allow_external=args.allow_external,
+        scope_file=args.scope_file,
         cloud=args.cloud,
         allow_cloud=args.allow_cloud,
         cloud_name=args.cloud_name,
@@ -400,6 +419,51 @@ def build_config(args) -> RunConfig:
     # knows it's allowed to prompt for an external profile upgrade.
     cfg.profile_is_auto = (args.profile == "auto")
     return cfg
+
+
+def run_host_sweep(cfg: RunConfig, args) -> int:
+    """CIDR/range sweep: discover live hosts, then run the full per-host pipeline
+    for each and write an index linking the per-host reports (#22). The range was
+    already authorized once at the gate before we got here."""
+    import dataclasses
+
+    banner("HOST DISCOVERY (CIDR sweep)")
+    live = recon.discover_hosts(cfg)
+    if not live:
+        warn("No live hosts found in range; nothing to do.")
+        event(cfg, "sweep_done", live=0)
+        return 0
+    good(f"{len(live)} live host(s): {', '.join(live)}")
+    event(cfg, "sweep_hosts", count=len(live), hosts=live)
+
+    rows: list[dict] = []
+    for ip in live:
+        if budget_exceeded():
+            warn("global time budget exhausted — stopping sweep early.")
+            break
+        banner(f"HOST {ip}")
+        hcfg = dataclasses.replace(
+            cfg, target=ip, hostname="", klass=classify_target(ip),
+            events_path=os.path.join(cfg.out_dir, f"events_{ip}.ndjson"),
+        )
+        events_init(hcfg.events_path)
+        host = recon.scan(hcfg)
+        if not host.all_services:
+            info(f"{ip}: no open services")
+            rows.append({"ip": ip, "services": 0, "candidates": 0, "report": ""})
+            continue
+        enum_res = enum_mod.enumerate_host(hcfg, host)
+        exp = exploit.identify(hcfg, host, enum_res)
+        exp.candidates = exploit.dedupe(exp.candidates)
+        md, _ = report.write_reports(hcfg, host, enum_res, exp)
+        rows.append({"ip": ip, "services": len(host.all_services),
+                     "candidates": len(exp.candidates), "report": md})
+
+    idx = report.write_sweep_index(cfg.out_dir, cfg.target, rows)
+    event(cfg, "sweep_done", live=len(live),
+          reports=len([r for r in rows if r["report"]]))
+    good(f"Sweep complete. Open {idx} for the index.")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -458,6 +522,10 @@ def main(argv=None) -> int:
         err("Authorization not confirmed. Aborting.")
         event(cfg, "run_abort", reason="authorization_not_confirmed")
         return 1
+
+    # CIDR/range target → multi-host sweep instead of the single-host pipeline (#22).
+    if recon.is_cidr(cfg.target):
+        return run_host_sweep(cfg, args)
 
     # HTB ergonomics: detect a .htb hostname and optionally add to /etc/hosts.
     if not cfg.hostname and cfg.klass == "htb":

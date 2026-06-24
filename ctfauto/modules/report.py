@@ -98,6 +98,85 @@ def write_reports(cfg: RunConfig, host: HostResult,
     return md_path, json_path
 
 
+def write_sweep_index(out_dir: str, range_target: str, rows: list[dict]) -> str:
+    """Write an index report for a CIDR sweep, linking each per-host report.
+    `rows` items: {ip, services, candidates, report (md path or '')}."""
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"index_{range_target.replace('/', '_')}.md")
+    L = [f"# ctfauto sweep — {range_target}\n",
+         f"- **Generated:** {datetime.now().isoformat(timespec='seconds')}",
+         f"- **Live hosts:** {len(rows)}", "",
+         "| Host | Services | Exploit candidates | Report |",
+         "|---|---|---|---|"]
+    for r in sorted(rows, key=lambda r: r.get("candidates", 0), reverse=True):
+        rep = os.path.basename(r["report"]) if r.get("report") else ""
+        link = f"[{rep}]({rep})" if rep else "—"
+        L.append(f"| {r['ip']} | {r.get('services', 0)} | {r.get('candidates', 0)} | {link} |")
+    L.append("")
+    with open(path, "w") as f:
+        f.write("\n".join(L) + "\n")
+    good(f"sweep index written: {path}")
+    return path
+
+
+def _priority_leads(host, enum, exploits) -> list[str]:
+    """Rank the findings into a 'try these first' worklist. Highest-signal items
+    first: known RCE → anonymous/unauth access → version-matched CVEs → default
+    creds. Returns formatted markdown bullets (most important first)."""
+    tiers: list[tuple[int, str]] = []  # (rank, bullet); lower rank = higher priority
+
+    # 1. High-confidence exploit leads (curated/NSE-bridged RCE).
+    for c in getattr(exploits, "candidates", []):
+        if c.high_confidence and c.msf_module:
+            tiers.append((1, f"**RCE** · :{c.port} — {c.title}  (`{c.msf_module}`)"))
+
+    # 2. Anonymous / unauthenticated access surfaced during enumeration.
+    for f in getattr(enum, "findings", []):
+        t = f.tags or {}
+        if t.get("anon_ftp"):
+            tiers.append((2, f"**Anon access** · :{f.service_port} — anonymous FTP login allowed"))
+        if t.get("smb_share"):
+            tiers.append((2, f"**Anon access** · :{f.service_port} — readable SMB share "
+                             f"`{t['smb_share']}` (null session)"))
+        if t.get("snmp_community"):
+            tiers.append((2, f"**Anon access** · :{f.service_port} — SNMP readable with "
+                             f"community `{t['snmp_community']}`"))
+        if t.get("path") == ".git/HEAD":
+            tiers.append((2, f"**Source leak** · :{f.service_port} — exposed `.git` directory"))
+        if t.get("cloud_state") in ("listable", "writable", "readable"):
+            tiers.append((2, f"**Cloud exposure** · {t.get('cloud','?').upper()} "
+                             f"{f.summary} ({t['cloud_state']})"))
+        if t.get("unauth_redis"):
+            tiers.append((1, f"**Unauth service** · :{f.service_port} — Redis open with no auth"))
+        if t.get("unauth_es"):
+            tiers.append((1, f"**Unauth service** · :{f.service_port} — Elasticsearch open with no auth"))
+        if t.get("unauth_docker"):
+            tiers.append((1, f"**Unauth service** · :{f.service_port} — Docker Engine API "
+                             "exposed (host takeover)"))
+        if t.get("anon_ldap"):
+            tiers.append((2, f"**Anon access** · :{f.service_port} — anonymous LDAP bind"))
+
+    # 3. NSE-flagged CVEs (known-vulnerable services).
+    for cve in getattr(host, "nse_cves", []) or []:
+        tiers.append((3, f"**Known CVE** · {cve} flagged by NSE vuln scan"))
+
+    # 4. Default-credential checks worth trying.
+    for c in getattr(exploits, "candidates", []):
+        if c.category == "creds":
+            tiers.append((4, f"**Default creds** · :{c.port} — {c.title}"))
+
+    if not tiers:
+        return []
+    tiers.sort(key=lambda x: x[0])
+    # de-dupe while preserving order
+    seen, ordered = set(), []
+    for _, bullet in tiers:
+        if bullet not in seen:
+            seen.add(bullet)
+            ordered.append(bullet)
+    return ordered
+
+
 def _render_md(cfg, host, enum, exploits) -> str:
     L = []
     L.append(f"# ctfauto recon report — {cfg.target}\n")
@@ -117,6 +196,16 @@ def _render_md(cfg, host, enum, exploits) -> str:
     L.append("> ⚠️ _Loot under the output dir (raw scans, dumps) may contain "
              "credentials or PII. Handle accordingly._")
     L.append("")
+
+    # Priority leads — a ranked 'try these first' worklist distilled from all phases.
+    leads = _priority_leads(host, enum, exploits)
+    if leads:
+        L.append("## Priority leads\n")
+        L.append("_Ranked highest-signal first. These are candidates for manual, "
+                 "authorized follow-up — ctfauto did not act on them._\n")
+        for i, bullet in enumerate(leads, 1):
+            L.append(f"{i}. {bullet}")
+        L.append("")
 
     # Cloud misconfiguration findings (if the cloud phase ran) — surfaced up top.
     cloud_finds = [f for f in enum.findings if f.tags.get("cloud")]

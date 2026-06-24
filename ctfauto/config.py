@@ -130,6 +130,7 @@ class RunConfig:
     # --- scope / authorization (issues #1, #2, #4) ----------------------------
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
     allow_external: bool = False     # explicit opt-in to actively touch an external target
+    scope_file: str = ""             # engagement allowlist; when set, target must match
     profile_is_auto: bool = True     # True if --profile auto (gate may prompt for external upgrade)
     events_path: str = ""            # NDJSON event log path (issue #25); "" = disabled
     seclists_dir: str = ""           # override SecLists root (else auto-detect / $CTFAUTO_SECLISTS)
@@ -142,6 +143,54 @@ class RunConfig:
     cloud_candidate_cap: int = 200   # max candidate names to probe (politeness bound)
 
 
+def load_scope(explicit: str = "") -> list:
+    """Load an authorized-target scope list (engagement allowlist).
+
+    Sources, in order: explicit path (--scope-file) → $CTFAUTO_SCOPE →
+    ~/.config/ctfauto/scope.txt. One entry per line; '#' comments and blank lines
+    ignored. Each entry is a CIDR, single IP, or a hostname (matched literally).
+    Returns a list of (kind, value) where kind is 'net' (ip_network) or 'host'
+    (lowercased string). An empty list means "no scope file configured" — callers
+    treat that as 'scope not enforced', preserving the flag-only behaviour."""
+    import os
+    path = explicit or os.environ.get("CTFAUTO_SCOPE", "") or \
+        os.path.expanduser("~/.config/ctfauto/scope.txt")
+    if not path or not os.path.exists(path):
+        return []
+    entries: list = []
+    try:
+        with open(path) as f:
+            for raw in f:
+                line = raw.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(("net", ipaddress.ip_network(line, strict=False)))
+                except ValueError:
+                    entries.append(("host", line.lower()))
+    except OSError:
+        return []
+    return entries
+
+
+def target_in_scope(target: str, scope: list) -> bool:
+    """True if `target` is covered by the scope list. An empty scope list means
+    'not configured' → True (don't block when no scope file is in use)."""
+    if not scope:
+        return True
+    tl = target.strip().lower()
+    try:
+        ip = ipaddress.ip_address(target)
+    except ValueError:
+        ip = None
+    for kind, value in scope:
+        if kind == "host" and value == tl:
+            return True
+        if kind == "net" and ip is not None and ip in value:
+            return True
+    return False
+
+
 def classify_target(target: str) -> str:
     """Return 'htb', 'lab', or 'external' for a target IP/host.
 
@@ -152,9 +201,16 @@ def classify_target(target: str) -> str:
     try:
         ip = ipaddress.ip_address(target)
     except ValueError:
-        # hostname — we can't safely classify by IP. Most cautious: external.
-        # (cli will resolve it and re-classify on the resolved IP where possible.)
-        return "external"
+        # A CIDR/range? classify by its network address (a sweep target).
+        if "/" in target:
+            try:
+                ip = ipaddress.ip_network(target, strict=False).network_address
+            except ValueError:
+                return "external"
+        else:
+            # hostname — we can't safely classify by IP. Most cautious: external.
+            # (cli resolves it and re-classifies on the resolved IP where possible.)
+            return "external"
     extra = _load_user_networks()
     for net in list(HTB_NETWORKS) + extra["htb"]:
         if ip in net:
@@ -173,6 +229,7 @@ def detect_tools() -> dict:
         "ffuf", "curl", "wget",
         # recon/enum tooling
         "onesixtyone", "snmpwalk", "snmp-check", "sslscan",
+        "ldapsearch",
         "wpscan", "droopescan", "mount", "showmount",
         "feroxbuster", "arjun",
         # exploit-identification helpers (presence drives which leads we surface)

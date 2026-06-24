@@ -21,12 +21,27 @@ git clone https://github.com/foldedarrow/AutoPentest.git
 cd AutoPentest
 sudo ./setup.sh                 # apt/pipx/gem-installs the toolchain (Kali)
 sudo python3 run.py --check     # show the tool + wordlist matrix
-sudo python3 run.py 192.168.56.101   # recon + enum + report
+sudo python3 run.py 192.168.56.101   # recon + enum + report (single host)
+sudo python3 run.py 192.168.56.0/24  # CIDR sweep: per-host reports + an index
 ```
 
 `run.py` is the entry point; everything runs from Kali with the standard pentest
 tools on `PATH`. **nmap is the only hard requirement** — any other missing tool is
 detected at startup and its steps are skipped.
+
+The report opens with a **Priority leads** section — a ranked "try these first"
+worklist (known RCE → unauthenticated/anonymous access → known CVEs → default
+creds) distilled from every phase.
+
+**CIDR sweep.** Give it a range (`10.10.0.0/24`) and ctfauto ping-sweeps for live
+hosts, runs the full pipeline against each, and writes `index_<range>.md` linking
+every per-host report (ranked by candidate count).
+
+**Scope allowlist.** For real engagements, point `--scope-file scope.txt` (or
+`$CTFAUTO_SCOPE` / `~/.config/ctfauto/scope.txt`) at a list of authorized
+CIDRs/IPs/hostnames. When set it's **authoritative**: any target not in the list is
+refused regardless of other flags — so a typo'd or out-of-scope target can't be
+scanned.
 
 ## Safety model
 
