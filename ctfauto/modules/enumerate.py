@@ -292,6 +292,7 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         param_urls = _discover_param_urls(cfg, base, found_dirs)
         if _have(cfg, "arjun", quiet=True):
             param_urls = list(dict.fromkeys(param_urls + _arjun_params(cfg, base)))
+        param_urls = [u for u in param_urls if _is_testable_param_url(u)]
         for u in param_urls:
             out.append(EnumFinding(svc.port, "param-url", f"parameterized URL: {u}",
                                    tags={"param_url": u}))
@@ -332,6 +333,28 @@ def _arjun_params(cfg: RunConfig, base: str) -> list[str]:
     except (OSError, ValueError, AttributeError):
         pass
     return urls
+
+
+# Static assets are never injectable; their `?v=`/`?_=` cache-busters just flood
+# the report with sqlmap/LFI candidates (a Pi-hole/AdminLTE scan produced ~60).
+_STATIC_EXTS = (".css", ".js", ".mjs", ".map", ".png", ".jpg", ".jpeg", ".gif",
+                ".svg", ".ico", ".webp", ".woff", ".woff2", ".ttf", ".eot",
+                ".otf", ".mp4", ".webm", ".pdf", ".zip")
+_CACHEBUSTER_PARAMS = {"v", "ver", "version", "_", "t", "ts", "cache", "cb", "rev", "r", "d"}
+
+
+def _is_testable_param_url(u: str) -> bool:
+    """Keep a parameterized URL only if it's worth testing. Drops static assets
+    (.css/.js/fonts/images) and URLs whose parameters are ALL cache-busters
+    (?v=, ?_=) — neither is injectable, and they dominate modern web UIs."""
+    import urllib.parse as _up
+    parsed = _up.urlparse(u)
+    if any(parsed.path.lower().endswith(ext) for ext in _STATIC_EXTS):
+        return False
+    names = [k.lower() for k, _ in _up.parse_qsl(parsed.query)]
+    if not names:
+        return False
+    return not all(n in _CACHEBUSTER_PARAMS for n in names)
 
 
 def _discover_param_urls(cfg: RunConfig, base: str, found_dirs: list[str]) -> list[str]:
@@ -379,8 +402,9 @@ def _discover_param_urls(cfg: RunConfig, base: str, found_dirs: list[str]) -> li
                 if key not in seen:
                     seen.add(key)
                     seen.add(url)
-    # return concrete URLs (those with both ? and =)
-    return [u for u in seen if "?" in u and "=" in u][:15]
+    # return concrete URLs (both ? and =), minus static assets / cache-buster-only
+    return [u for u in seen
+            if "?" in u and "=" in u and _is_testable_param_url(u)][:15]
 
 
 # --- FTP ---------------------------------------------------------------------

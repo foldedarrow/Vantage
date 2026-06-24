@@ -893,5 +893,57 @@ class TestSweepIndex(unittest.TestCase):
         self.assertLess(body.index("10.0.0.2"), body.index("10.0.0.1"))
 
 
+class TestParamUrlFiltering(unittest.TestCase):
+    """Static assets and cache-buster-only params must be dropped — a real Pi-hole
+    scan teed up ~60 bogus sqlmap/LFI candidates against .css/.js?v=... URLs."""
+    def test_static_css_js_dropped(self):
+        for u in ("http://h/admin/style/pi-hole.css?v=1778323977",
+                  "http://h/admin/vendor/jquery/jquery.min.js?v=1778323977",
+                  "http://h/img/logo.png?cb=1", "http://h/fonts/x.woff2?v=2"):
+            self.assertFalse(EN._is_testable_param_url(u), u)
+
+    def test_cachebuster_only_dropped(self):
+        self.assertFalse(EN._is_testable_param_url("http://h/page?v=123"))
+        self.assertFalse(EN._is_testable_param_url("http://h/page?_=99&t=1"))
+
+    def test_real_param_kept(self):
+        self.assertTrue(EN._is_testable_param_url("http://h/search.php?q=test"))
+        self.assertTrue(EN._is_testable_param_url("http://h/item?id=1&v=2"))  # has real id
+
+    def test_discover_filters_static(self):
+        cfg = RunConfig(target="192.168.4.2", profile=Profile.lab())
+        body = ('<link href="/admin/style/pi-hole.css?v=1778323977">'
+                '<script src="/admin/vendor/jquery/jquery.min.js?v=1778323977"></script>'
+                '<a href="/admin/index.php?id=1">x</a>')
+        with mock.patch.object(EN, "run", return_value=(0, body, "")):
+            urls = EN._discover_param_urls(cfg, "http://192.168.4.2", [])
+        self.assertTrue(all(not u.endswith(".css?v=1778323977") for u in urls), urls)
+        self.assertTrue(all(".min.js" not in u for u in urls), urls)
+        self.assertTrue(any("index.php?id=1" in u for u in urls), urls)
+
+
+class TestSearchsploitNoiseGuard(unittest.TestCase):
+    """Don't search Exploit-DB for generic/mislabelled service names with no
+    version (nmap labelling Pi-hole's lighttpd 'webdav' -> 40 irrelevant hits)."""
+    def _cfg(self):
+        return RunConfig(target="192.168.4.2", profile=Profile.lab(),
+                         discovered_tools={"searchsploit": "/usr/bin/searchsploit"})
+
+    def test_webdav_no_version_skipped(self):
+        h = R.HostResult(ip="192.168.4.2")
+        h.services = [_svc(80, "webdav")]  # no product/version
+        with mock.patch.object(E, "run") as run_mock:
+            cands = E._searchsploit_candidates(self._cfg(), h)
+        run_mock.assert_not_called()
+        self.assertEqual(cands, [])
+
+    def test_real_banner_still_searched(self):
+        h = R.HostResult(ip="192.168.4.2")
+        h.services = [_svc(21, "ftp", product="vsftpd", version="2.3.4")]
+        with mock.patch.object(E, "run", return_value=(0, "[]", "")) as run_mock:
+            E._searchsploit_candidates(self._cfg(), h)
+        self.assertTrue(run_mock.called)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
