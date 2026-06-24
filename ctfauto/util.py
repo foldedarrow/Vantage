@@ -78,15 +78,33 @@ def warn_once(key: str, msg: str) -> None:
 
 # --- NDJSON event log (issue #25) --------------------------------------------
 _events_lock = threading.Lock()
+# Set by events_init so the low-level run() can log per-command exec events to the
+# same stream WITHOUT every caller threading cfg through (drives the live web view).
+_events_path_cur: str = ""
 
 
 def events_init(path: str) -> None:
     """Truncate/create the NDJSON event log for a fresh run."""
+    global _events_path_cur
+    _events_path_cur = path or ""
     if not path:
         return
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         open(path, "w").close()
+    except OSError:
+        pass
+
+
+def _log_event(kind: str, **fields) -> None:
+    """Append an event to the current run's NDJSON stream. Never raises."""
+    if not _events_path_cur:
+        return
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "event": kind}
+    rec.update(fields)
+    try:
+        with _events_lock, open(_events_path_cur, "a") as f:
+            f.write(json.dumps(rec, default=str) + "\n")
     except OSError:
         pass
 
@@ -167,7 +185,10 @@ def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, 
             return 125, "", "budget-exhausted"
         timeout = int(min(timeout, rem)) or 1
     info(f"exec: {C.GREY}{' '.join(cmd)}{C.RESET}")
+    # Emit a live 'exec_start' so the web dashboard can show what's running now.
+    _log_event("exec_start", tool=cmd[0], cmd=" ".join(cmd))
     start = time.time()
+    rc = None
     # Heartbeat only for calls we expect could be long.
     hb = _Heartbeat(cmd[0], interval=30.0) if timeout >= 60 else None
     try:
@@ -180,18 +201,22 @@ def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, 
             timeout=timeout,
         )
         dur = time.time() - start
+        rc = proc.returncode
         if dur > 1:
             info(f"  -> finished in {dur:.1f}s (rc={proc.returncode})")
         return proc.returncode, proc.stdout or "", proc.stderr or ""
     except FileNotFoundError:
         err(f"tool not found: {cmd[0]}")
+        rc = 127
         return 127, "", "tool-not-found"
     except subprocess.TimeoutExpired:
         warn(f"timed out after {timeout}s: {cmd[0]}")
+        rc = 124
         return 124, "", "timeout"
     finally:
         if hb:
             hb.__exit__()
+        _log_event("exec_end", tool=cmd[0], rc=rc, dur=round(time.time() - start, 1))
 
 
 def parallel_map(fn, items, workers: int = 4):

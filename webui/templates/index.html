@@ -2,6 +2,27 @@
 {% block title %}ctfauto — targets{% endblock %}
 {% block content %}
 
+{% if live %}
+<h2>● Live scans</h2>
+<div class="grid">
+  {% for s in live %}
+  <div class="card" style="border-left:3px solid var(--green)">
+    <h3><a href="/live/{{ s.slug }}">{{ s.slug }}</a> <span class="live-dot">●</span></h3>
+    <div class="meta">
+      {% if s.status.current %}
+        <span>▶ running <b>{{ s.status.current.tool }}</b></span>
+      {% else %}
+        <span>… {{ s.status.phase or 'working' }}</span>
+      {% endif %}
+      <span>{{ s.status.n_events }} events</span>
+    </div>
+    {% if s.status.current %}<div class="muted" style="font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.status.current.cmd }}</div>{% endif %}
+    <div><a href="/live/{{ s.slug }}">watch live →</a></div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% if sweeps %}
 <h2>CIDR sweeps</h2>
 <div class="grid">
@@ -40,12 +61,19 @@
   </div>
   {% endfor %}
 </div>
-{% else %}
+{% elif not live %}
 <div class="empty">
   No reports found in <code>{{ loot }}</code>.<br>
   Run ctfauto first (e.g. <code>python run.py 192.168.56.101</code>), or point the
   dashboard at the right loot dir with <code>--loot</code> / <code>$CTFAUTO_LOOT</code>.
 </div>
+{% endif %}
+
+{% if live %}
+<script>
+  // A scan is in progress — refresh the dashboard so live cards update.
+  setTimeout(() => location.reload(), 5000);
+</script>
 {% endif %}
 
 {% endblock %}

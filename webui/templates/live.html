@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}ctfauto live — {{ slug }}{% endblock %}
+{% block content %}
+<p class="back"><a href="/">&larr; all targets</a></p>
+<h1 style="font-family:ui-monospace,monospace">{{ slug }} <span class="live-dot">●</span></h1>
+
+<div id="activity" class="leadbox" style="border-left-color:var(--green)">…loading…</div>
+
+<h2>Activity log</h2>
+<div id="timeline" class="timeline"></div>
+
+<script>
+const slug = {{ slug|tojson }};
+const activity = document.getElementById('activity');
+const timeline = document.getElementById('timeline');
+
+function fmt(e) {
+  return Object.entries(e)
+    .filter(([k]) => k !== 'ts' && k !== 'event')
+    .map(([k, v]) => `${k}=${v}`).join(' ');
+}
+
+async function tick() {
+  let d;
+  try { d = await (await fetch(`/api/events/${encodeURIComponent(slug)}`)).json(); }
+  catch (_) { return; }
+  const st = d.status || {};
+  if (st.done) {
+    activity.innerHTML = '✓ <b>scan complete</b> — <a href="/report/' + encodeURIComponent(slug) + '">open the report →</a>';
+    render(d.events);
+    clearInterval(timer);
+    return;
+  }
+  if (st.running && st.current) {
+    activity.innerHTML = '▶ running <b>' + st.current.tool + '</b> '
+      + '<span class="live-dot">●</span><br>'
+      + '<span class="muted" style="font-family:var(--mono);font-size:12px">' + st.current.cmd + '</span>';
+  } else {
+    activity.innerHTML = '… working <span class="muted">(' + (st.phase || 'in progress') + ')</span>';
+  }
+  render(d.events);
+}
+
+function render(events) {
+  // newest first, capped so a long run stays readable
+  timeline.innerHTML = events.slice().reverse().slice(0, 200).map(e =>
+    `<div class="ev"><span class="ts">${e.ts || ''}</span> `
+    + `<span class="kind">${e.event}</span> `
+    + `<span class="muted">${fmt(e)}</span></div>`).join('');
+}
+
+const timer = setInterval(tick, 2000);
+tick();
+</script>
+{% endblock %}

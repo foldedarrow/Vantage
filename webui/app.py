@@ -162,11 +162,68 @@ def load_events(slug: str) -> list[dict]:
     return events
 
 
+def _scan_status(events: list[dict]) -> dict:
+    """Derive live status from the event stream: is a scan running, what command
+    is executing now, and is it finished. exec_start/exec_end (emitted by every
+    tool run) drive the 'current activity'; phase events drive progress."""
+    done = any(e.get("event") in ("run_done", "run_abort", "sweep_done") for e in events)
+    active, last_start, phase = 0, None, ""
+    for e in events:
+        ev = e.get("event", "")
+        if ev == "exec_start":
+            active += 1
+            last_start = e
+        elif ev == "exec_end":
+            active = max(0, active - 1)
+        elif ev.endswith("_done") or ev.endswith("_start"):
+            phase = ev
+    running = active > 0 and not done
+    current = None
+    if running and last_start:
+        current = {"tool": last_start.get("tool", ""), "cmd": last_start.get("cmd", ""),
+                   "ts": last_start.get("ts", "")}
+    return {"running": running, "done": done, "current": current,
+            "phase": phase, "n_events": len(events)}
+
+
+def list_live() -> list[dict]:
+    """Scans with an event log that hasn't finished yet — i.e. running right now
+    (report_*.json may not exist until the final phase)."""
+    root = loot_dir()
+    out = []
+    if not os.path.isdir(root):
+        return out
+    for name in sorted(os.listdir(root)):
+        if not (name.startswith("events_") and name.endswith(".ndjson")):
+            continue
+        slug = name[len("events_"):-len(".ndjson")]
+        events = load_events(slug)
+        if not events:
+            continue
+        status = _scan_status(events)
+        if status["done"]:
+            continue            # finished -> shown under Targets
+        out.append({"slug": slug, "status": status,
+                    "last": events[-1].get("event", "")})
+    return out
+
+
 # --- routes ------------------------------------------------------------------
 @app.route("/")
 def index():
     return render_template("index.html", targets=list_targets(),
-                           sweeps=list_sweeps(), loot=loot_dir())
+                           sweeps=list_sweeps(), live=list_live(), loot=loot_dir())
+
+
+@app.route("/live/<slug>")
+def live(slug: str):
+    if not _SLUG_RE.match(slug):
+        abort(404)
+    events = load_events(slug)
+    if not events:
+        abort(404)
+    return render_template("live.html", slug=slug, events=events,
+                           status=_scan_status(events))
 
 
 @app.route("/report/<slug>")
@@ -194,8 +251,10 @@ def sweep(slug: str):
 
 @app.route("/api/events/<slug>")
 def api_events(slug: str):
-    """JSON event feed (a frontend could poll this for a live view)."""
-    return jsonify(load_events(slug))
+    """JSON event feed the live view polls: the full event list plus derived
+    status (running / current command / done)."""
+    events = load_events(slug)
+    return jsonify({"events": events, "status": _scan_status(events)})
 
 
 def main(argv=None):
