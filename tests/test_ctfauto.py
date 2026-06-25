@@ -186,9 +186,13 @@ class TestWordlists(unittest.TestCase):
         self.assertTrue(got.endswith("raft-medium-directories.txt"))
 
     def test_missing_seclists_returns_empty_or_fallback(self):
-        # No SecLists, no system wordlists in the test env => '' for vhost.
+        # No SecLists anywhere => '' for vhost. Kali ships SecLists at
+        # /usr/share/seclists, so we must blank the known-roots list or the
+        # resolver finds the real one and this test is non-hermetic (it failed
+        # only on Kali). setUp already clears the cache + $CTFAUTO_SECLISTS.
         cfg = self._cfg(seclists_dir="/definitely/not/here")
-        self.assertEqual(W.vhost_wordlist(cfg), "")
+        with mock.patch.object(W, "_SECLISTS_ROOTS", []):
+            self.assertEqual(W.vhost_wordlist(cfg), "")
 
 
 class TestCloud(unittest.TestCase):
