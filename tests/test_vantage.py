@@ -1640,6 +1640,32 @@ class TestADReport(unittest.TestCase):
         self.assertTrue(any("AD users" in l for l in leads))
 
 
+class TestNoWebNoSqlmap(unittest.TestCase):
+    """A host with no web service (a bare DC) must NOT get a sqlmap crawl lead
+    against a blind :80 — that port isn't even open."""
+    def test_no_sqlmap_sweep_without_web_port(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                        discovered_tools={"sqlmap": "/usr/bin/sqlmap"})
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(88, "kerberos-sec"), _svc(389, "ldap")]
+        enum = EN.EnumResult()
+        enum.findings.append(EN.EnumFinding(88, "recon", "Kerberos DC"))
+        cands = E._web_candidates(cfg, h, enum)
+        self.assertFalse([c for c in cands if c.web_action == "sqlmap_crawl"])
+
+    def test_sqlmap_sweep_when_real_web_port(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"sqlmap": "/usr/bin/sqlmap"})
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(8080, "http")]
+        enum = EN.EnumResult()
+        enum.findings.append(EN.EnumFinding(8080, "whatweb", "fingerprint"))
+        cands = E._web_candidates(cfg, h, enum)
+        sweep = [c for c in cands if c.web_action == "sqlmap_crawl"]
+        self.assertTrue(sweep)
+        self.assertEqual(sweep[0].port, 8080)
+
+
 class TestADToolDetection(unittest.TestCase):
     def test_ad_tools_probed(self):
         from vantage.config import detect_tools

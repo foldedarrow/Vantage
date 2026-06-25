@@ -815,10 +815,12 @@ def _ad_active_ok(cfg: RunConfig) -> bool:
 
 
 def _ad_userlist(cfg: RunConfig) -> str:
-    """Path to a username list for Kerberos enumeration. On lab/aggressive, prefer
-    a resolved SecLists username wordlist (broad coverage); otherwise fall back to
-    the small built-in seed written into the output dir (quiet, targeted)."""
-    if _ad_active_ok(cfg):
+    """Path to a username list for Kerberos enumeration. Only --aggressive pulls
+    the full SecLists username wordlist — feeding thousands of names to GetNPUsers
+    / krb5-enum-users one AS-REQ at a time overruns the per-tool timeout and the
+    run silently produces nothing. The default (incl. plain lab) uses the small
+    built-in seed of common AD/service accounts: fast and catches the usual wins."""
+    if cfg.aggressive:
         wl = wordlists.username_wordlist(cfg, cfg.wordlist_users)
         if wl:
             return wl
@@ -935,13 +937,16 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
                            f"Kerberos (88) — Active Directory DC for realm {domain}",
                            tags={"ad_domain": domain, "ad_dc": True}))
     userlist = _ad_userlist(cfg)
+    # --aggressive uses the full username wordlist (thousands of AS-REQs), so give
+    # the Kerberos tools a much larger budget; the default seed run stays snappy.
+    kt = 600 if cfg.aggressive else 180
 
     # 1. Username validation. kerbrute is fastest/quietest; fall back to the always
     #    -present nmap krb5-enum-users script.
     valid_users: list[str] = []
     if userlist and _have(cfg, "kerbrute", quiet=True) and _ad_active_ok(cfg):
         rc, kb, _ = run(["kerbrute", "userenum", "--dc", cfg.target, "-d", domain,
-                         userlist, "-o", "/dev/stdout"], timeout=180)
+                         userlist, "-o", "/dev/stdout"], timeout=kt)
         valid_users = sorted({m.group(1) for m in
                               re.finditer(r"VALID USERNAME:\s+([^@\s]+)@", kb)})
         if valid_users:
@@ -953,7 +958,7 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
         rc, nse, _ = run(["nmap", "-p", "88", "--script", "krb5-enum-users",
                           "--script-args",
                           f"krb5-enum-users.realm={domain},userdb={userlist}",
-                          cfg.target], timeout=180)
+                          cfg.target], timeout=kt)
         valid_users = sorted({m.group(1) for m in
                               re.finditer(r"^\|\s+([^@\s]+)@", nse, re.M)})
         if valid_users:
@@ -975,7 +980,7 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
             except OSError:
                 roast_file = userlist
         rc, npo, _ = run([getnp, f"{domain}/", "-dc-ip", cfg.target, "-no-pass",
-                          "-usersfile", roast_file, "-format", "hashcat"], timeout=180)
+                          "-usersfile", roast_file, "-format", "hashcat"], timeout=kt)
         hashes = [l.strip() for l in npo.splitlines() if l.startswith("$krb5asrep$")]
         if hashes:
             out.append(EnumFinding(svc.port, "GetNPUsers",
