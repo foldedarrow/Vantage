@@ -18,7 +18,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      # ctfauto is stdlib-only; the suite is offline/mocked, so no external tools
+      # vantage is stdlib-only; the suite is offline/mocked, so no external tools
       # (nmap, etc.) are needed to run the tests.
       - name: Run test suite
         run: python -m unittest discover -s tests -v

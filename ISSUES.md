@@ -1,4 +1,4 @@
-# ctfauto — issues & improvement backlog
+# vantage — issues & improvement backlog
 
 Findings from a full read + runtime verification of the codebase (commit `8142874`).
 Each item is written to be individually actionable: **severity · location · what's wrong ·
@@ -267,7 +267,7 @@ ones, rank, and where a Metasploit module exists for the CVE, auto-promote it in
 gated exploit flow (lab-only). At minimum, `searchsploit -m` the top match into loot.
 
 ### #25 — No structured run log / NDJSON event stream for automation 💡
-**What:** Output is colored stdout + a final MD/JSON. For chaining ctfauto into larger
+**What:** Output is colored stdout + a final MD/JSON. For chaining vantage into larger
 automation (or re-analysis), a machine-readable event log written incrementally is more
 useful than only an end-of-run JSON.
 **Fix:** Emit NDJSON events (phase start/stop, finding, candidate, exploit result) to
@@ -287,8 +287,8 @@ here too (#27).
 **What:** Wordlist paths were hardcoded; the vhost path in particular had no fallback
 and silently skipped when SecLists wasn't at that exact location (and the apt vs
 pip/git capitalisation differs: `/usr/share/seclists` vs `/usr/share/SecLists`).
-**Fixed:** New `ctfauto/wordlists.py` resolves the SecLists root across all common
-install locations + `$CTFAUTO_SECLISTS` + `--seclists-dir`, with named getters
+**Fixed:** New `vantage/wordlists.py` resolves the SecLists root across all common
+install locations + `$VANTAGE_SECLISTS` + `--seclists-dir`, with named getters
 (directory, files, vhost, LFI, params, usernames, passwords) that try SecLists first
 and fall back to dirb/rockyou/metasploit lists. All consumers route through it; the
 LFI stage now augments its built-in payloads from the SecLists LFI list (capped at
@@ -299,8 +299,8 @@ LFI stage now augments its built-in payloads from the SecLists LFI list (capped 
 ## S4 — Capability (cloud)
 
 ### #32 — Cloud recon: unauthenticated public-misconfiguration discovery ✅ ADDED
-**What:** ctfauto was host-only (IP + ports). Added a cloud phase
-(`ctfauto/modules/cloud.py`) for the cloud equivalent of recon — finding
+**What:** vantage was host-only (IP + ports). Added a cloud phase
+(`vantage/modules/cloud.py`) for the cloud equivalent of recon — finding
 **publicly-exposed** storage a target has left open.
 **Scope (deliberately narrow):** probes only resources reachable to anonymous
 requests; never private resources, IAM, or credentials. AWS S3 (exists / listable /
@@ -331,16 +331,16 @@ multi-host), and dedupe tests. Pure-stdlib `unittest` keeps the no-dependency pr
 
 ### #29 — No packaging metadata 🔎
 **Where:** repo root (no `pyproject.toml`/`setup.py`, no `requirements.txt`).
-**What:** Runs via `python run.py` only; not installable as `ctfauto` despite `cli:main`
+**What:** Runs via `python run.py` only; not installable as `vantage` despite `cli:main`
 being structured for an entry point.
-**Fix:** Add `pyproject.toml` with a console-script entry point (`ctfauto = ctfauto.cli:main`)
+**Fix:** Add `pyproject.toml` with a console-script entry point (`vantage = vantage.cli:main`)
 and an optional extra for pymetasploit3.
 
 ### #30 — `__version__` import will crash; `__init__.py` is effectively empty ✅
-**Where:** `cli.py` imports `from . import __version__`; `ctfauto/__init__.py` is 2
+**Where:** `cli.py` imports `from . import __version__`; `vantage/__init__.py` is 2
 lines.
 **What:** `cli.py` and `--version` reference `__version__`, and the report/run banners
-print `ctfauto 0.1.0`, so `__init__.py` must define it. It currently shows as a 2-line
+print `vantage 0.1.0`, so `__init__.py` must define it. It currently shows as a 2-line
 file — confirm `__version__ = "0.1.0"` is actually there (the banner printed `0.1.0` in
 testing, so it likely is, but it's the kind of thing that breaks on refactor).
 **Fix:** Pin `__version__` in one place and have packaging read from it.
@@ -401,8 +401,8 @@ signature backdoors but had real gaps and a false positive. Suite **144 green**.
   full enumeration + `--aggressive`. Built-in lab stays last (HTB users are
   unaffected unless they explicitly opt out). Tests: `TestClassification`
   (lab-net cases), `TestLabNetCli`.
-  - One-off:  `ctfauto 10.10.10.104 --lab-net 10.10.10.0/24 --aggressive`
-  - Persist:  `~/.config/ctfauto/networks.json` → `{"lab": ["10.10.10.0/24"]}`
+  - One-off:  `vantage 10.10.10.104 --lab-net 10.10.10.0/24 --aggressive`
+  - Persist:  `~/.config/vantage/networks.json` → `{"lab": ["10.10.10.0/24"]}`
   - (`--profile lab` already forced the full enumeration intensity, but kept the
     "htb" label and the aggressive block; `--lab-net` fixes the classification.)
 
@@ -412,7 +412,7 @@ signature backdoors but had real gaps and a false positive. Suite **144 green**.
 
 Manual `msfconsole` repro nailed it: the operator's MSF has a GLOBAL default
 payload (`setg PAYLOAD cmd/linux/http/x86/meterpreter_reverse_tcp`) that overrides
-each module's default and aborts on missing LHOST — even outside ctfauto. Also
+each module's default and aborts on missing LHOST — even outside vantage. Also
 confirmed `6200/tcp closed`, so there was never a stale backdoor; the exploit just
 never attached because of the bad payload. Suite **97 green**.
 
@@ -485,7 +485,7 @@ The first real run surfaced bugs unit tests couldn't. All fixed, suite now
   NAT/virtual NICs returns every port as `tcpwrapped` with no banners, which
   silently crippled the whole exploit phase (no signature matched). Fixed with
   (a) a `--connect`/`-sT` flag to force a connect scan, and (b) automatic
-  fallback: when `recon._mostly_tcpwrapped` detects the pattern, ctfauto re-scans
+  fallback: when `recon._mostly_tcpwrapped` detects the pattern, vantage re-scans
   the open ports with `-sT -sV --version-intensity 9` and keeps the richer
   result. Tests: `TestTcpwrappedFallback`.
 - **NSE finding explosion** — every NSE vuln line became its own `:0` finding
@@ -520,7 +520,7 @@ A second review pass closed the remaining items below. All covered by tests
   Samba usermap, UnrealIRCd, distcc, ProFTPD 1.3.3c, php-cgi) into the gated MSF
   flow, deduped against the curated signatures. Tests: `TestSearchsploitPromotion`.
 - **#31 (redaction) RESOLVED** — `report._redact` masks private keys, AWS keys,
-  `password`/`secret`/`token` k=v pairs, hydra success lines, and ctfauto's own
+  `password`/`secret`/`token` k=v pairs, hydra success lines, and vantage's own
   `VALID CREDS:` pairs in the *Markdown* report; raw data still lands in the
   gitignored JSON/loot. HTB flags (32-hex) are deliberately preserved. Tests:
   `TestRedaction`.

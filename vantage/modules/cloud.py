@@ -210,8 +210,8 @@ def _s3_probe(cfg: RunConfig, bucket: str, res: CloudResult) -> None:
     # 2. anonymous object read is implied by listable; note it
     # 3. write probe — ONLY under --aggressive (single innocuous marker)
     if cfg.aggressive:
-        marker = "ctfauto-write-test.txt"
-        body = b"ctfauto authorized write test - safe to delete\n"
+        marker = "vantage-write-test.txt"
+        body = b"vantage authorized write test - safe to delete\n"
         if use_cli:
             # write via a temp file
             tmp = os.path.join(cfg.out_dir, marker)

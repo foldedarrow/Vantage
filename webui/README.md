@@ -1,6 +1,6 @@
-# ctfauto web dashboard
+# vantage web dashboard
 
-A Flask **control panel + viewer** over ctfauto. It launches scans, shows them
+A Flask **control panel + viewer** over vantage. It launches scans, shows them
 running live, and renders the artifacts each run produces:
 
 - **New scan** — a form exposing the CLI options (target, profile incl. **stealth**,
@@ -35,7 +35,7 @@ webui/.venv/bin/pip install -r webui/requirements.txt
 webui/.venv/bin/python webui/app.py --loot /path/to/loot
 ```
 
-Flags: `--loot <dir>` (or `$CTFAUTO_LOOT`, default `./loot`), `--host <addr>`
+Flags: `--loot <dir>` (or `$VANTAGE_LOOT`, default `./loot`), `--host <addr>`
 (default `127.0.0.1`), `--port <n>` (default `5000`), `--debug`.
 
 **Run it with `sudo`** if you want full scan capability — nmap needs root for SYN

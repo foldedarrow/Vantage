@@ -3,25 +3,26 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ctfauto"
+name = "vantage"
 version = "0.1.0"
 description = "Automated recon & enumeration with a report for owned & authorized targets (HTB, Metasploitable, lab VMs). Identifies candidate exploits but never runs them."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "foldedarrow" }]
-keywords = ["pentest", "ctf", "hackthebox", "automation", "security"]
+keywords = ["pentest", "recon", "enumeration", "hackthebox", "automation", "security"]
 
-# Core ctfauto is stdlib-only. The external recon/enum CLI tools (nmap, gobuster,
+# Core vantage is stdlib-only. The external recon/enum CLI tools (nmap, gobuster,
 # nikto, searchsploit, ...) are system packages, not pip deps — see setup.sh /
-# `ctfauto --check`.
+# `vantage --check`.
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
 [project.scripts]
-ctfauto = "ctfauto.cli:main"
+vantage = "vantage.cli:main"
+ctfauto = "vantage.cli:main"   # back-compat alias for the old command name
 
 [tool.setuptools]
-packages = ["ctfauto", "ctfauto.modules"]
+packages = ["vantage", "vantage.modules"]

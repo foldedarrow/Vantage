@@ -4,16 +4,16 @@ SecLists ships an enormous, well-curated set of wordlists, but where it lives
 depends on how it was installed:
   - apt (Kali `seclists` package):   /usr/share/seclists
   - pip / git clone:                 /usr/share/SecLists, /opt/SecLists, ~/SecLists
-  - custom:                          $CTFAUTO_SECLISTS or --seclists-dir
+  - custom:                          $VANTAGE_SECLISTS or --seclists-dir
 
 This module finds the SecLists root ONCE (cached), then exposes named getters
-for the wordlists ctfauto actually uses. Every getter tries the SecLists-relative
+for the wordlists vantage actually uses. Every getter tries the SecLists-relative
 path first and falls back to a non-SecLists equivalent, so the tool still works
 on a box without SecLists — it just uses smaller lists.
 
 Resolution precedence for the SecLists root:
   1. explicit override (cfg.seclists_dir / --seclists-dir)
-  2. $CTFAUTO_SECLISTS
+  2. $VANTAGE_SECLISTS
   3. the first known install location that exists on disk
 """
 from __future__ import annotations
@@ -54,11 +54,11 @@ def _seclists_root(cfg=None) -> str:
     if _seclists_root_cache is not None:
         return _seclists_root_cache
 
-    # 2. environment variable
-    env = os.environ.get("CTFAUTO_SECLISTS", "")
+    # 2. environment variable (new name, with legacy ctfauto fallback)
+    env = os.environ.get("VANTAGE_SECLISTS", "") or os.environ.get("CTFAUTO_SECLISTS", "")
     if env and os.path.isdir(env):
         _seclists_root_cache = env
-        info(f"SecLists: using $CTFAUTO_SECLISTS -> {env}")
+        info(f"SecLists: using $VANTAGE_SECLISTS -> {env}")
         return env
 
     # 3. known locations

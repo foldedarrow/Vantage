@@ -98,7 +98,7 @@ def _stealth_nmap_flags(cfg: RunConfig) -> list[str]:
       --randomize-hosts shuffle target order on a sweep
       --source-port    optional: appear to come from 53/80/443 to slip naive ACLs
       -D               optional: hide the real source among decoys
-    All of these need root (raw packets); ctfauto already runs under sudo."""
+    All of these need root (raw packets); vantage already runs under sudo."""
     flags: list[str] = ["--max-retries", "1", "--randomize-hosts"]
     if not is_cidr(cfg.target):
         flags.insert(0, "-Pn")

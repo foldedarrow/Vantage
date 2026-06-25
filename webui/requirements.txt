@@ -1,4 +1,4 @@
-# ctfauto web dashboard (read-only viewer over loot/). The core tool stays
+# vantage web dashboard (read-only viewer over loot/). The core tool stays
 # stdlib-only; these deps are ONLY for the optional dashboard.
 Flask>=3.0
 Markdown>=3.5

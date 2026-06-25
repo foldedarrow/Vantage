@@ -1,4 +1,4 @@
-"""ctfauto CLI orchestrator."""
+"""vantage CLI orchestrator."""
 from __future__ import annotations
 
 import argparse
@@ -53,7 +53,7 @@ _INSTALL_HINTS = {
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="ctfauto",
+        prog="vantage",
         description="Automated recon & enumeration for owned & authorized targets "
                     "(HTB, Metasploitable, lab VMs). Produces a report — it never "
                     "exploits anything.",
@@ -68,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "nikto, NSE vuln scripts, active web crawl). Noisy. Lab only.")
     p.add_argument("--allow-external", action="store_true",
                    help="Explicitly authorize ACTIVE recon of a target outside known "
-                        "lab/HTB ranges (a public/unknown IP). Required before ctfauto "
+                        "lab/HTB ranges (a public/unknown IP). Required before vantage "
                         "will scan such a target — you are asserting you have written "
                         "permission. On --profile auto you'll be prompted to choose the "
                         "gentle or full lab profile; pass --profile lab to opt into the "
@@ -79,13 +79,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "10.10.0.0/16 you actually own (e.g. a local Metasploitable at "
                         "10.10.10.104) is treated as 'lab' — full enumeration, "
                         "--aggressive honoured — instead of being force-gentled as HTB "
-                        "shared infra. Persist it instead in ~/.config/ctfauto/"
+                        "shared infra. Persist it instead in ~/.config/vantage/"
                         "networks.json under the \"lab\" key.")
     p.add_argument("--scope-file", default="",
                    help="Path to an engagement scope allowlist (CIDRs/IPs/hostnames, "
-                        "one per line, '#' comments). When set, ctfauto REFUSES any "
+                        "one per line, '#' comments). When set, vantage REFUSES any "
                         "target not covered by the list — regardless of other flags. "
-                        "Also read from $CTFAUTO_SCOPE or ~/.config/ctfauto/scope.txt.")
+                        "Also read from $VANTAGE_SCOPE or ~/.config/vantage/scope.txt.")
     p.add_argument("--check", "--doctor", dest="check", action="store_true",
                    help="Print the tool/dependency matrix and install hints, then exit")
     p.add_argument("--wordlist-dirs", default="", help="gobuster/feroxbuster wordlist path")
@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wordlist-pass", default="", help="hydra password wordlist")
     p.add_argument("--seclists-dir", default="",
                    help="SecLists root (else auto-detect common locations / "
-                        "$CTFAUTO_SECLISTS). e.g. /usr/share/seclists")
+                        "$VANTAGE_SECLISTS). e.g. /usr/share/seclists")
     p.add_argument("--no-default-creds", action="store_true",
                    help="Skip flagging known default-credential pairs in the report "
                         "(on by default; this only identifies them, never tries them)")
@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Force an nmap TCP connect scan (-sT) instead of the default "
                         "SYN scan. Use this when a SYN scan returns everything as "
                         "'tcpwrapped' (common with some hypervisor NAT/virtual NICs). "
-                        "ctfauto also auto-falls-back to -sT when it detects this.")
+                        "vantage also auto-falls-back to -sT when it detects this.")
     p.add_argument("--no-udp", action="store_true", help="Disable UDP scan even on lab profile")
     p.add_argument("--no-nse-vuln", action="store_true", help="Disable nmap --script vuln")
     p.add_argument("--hostname", default="", help="Force a hostname (e.g. box.htb) for HTTP/vhost enum")
@@ -157,13 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Comma-separated extra permutation words (e.g. teamname,project)")
     cloud.add_argument("--cloud-cap", type=int, default=200,
                        help="Max candidate names to probe per provider (default 200)")
-    p.add_argument("--version", action="version", version=f"ctfauto {__version__}")
+    p.add_argument("--version", action="version", version=f"vantage {__version__}")
     return p
 
 
 # --- doctor / dependency check ----------------------------------------------
 def run_doctor(args=None) -> int:
-    banner(f"ctfauto {__version__} — dependency check")
+    banner(f"Vantage {__version__} — dependency check")
     tools = detect_tools()
     width = max(len(t) for t in tools)
     missing = []
@@ -203,7 +203,7 @@ def run_doctor(args=None) -> int:
     root = wl.pop("seclists_root")
     if root == "(not found)":
         warn(f"SecLists not found. Install it (apt install seclists) or point "
-             f"--seclists-dir / $CTFAUTO_SECLISTS at it. Looked in: "
+             f"--seclists-dir / $VANTAGE_SECLISTS at it. Looked in: "
              f"/usr/share/seclists, /usr/share/SecLists, /opt, ~/.")
     else:
         good(f"SecLists root: {root}")
@@ -257,7 +257,7 @@ def _prompt_external_profile(cfg: RunConfig) -> None:
     print("The LAB profile is full-intensity enumeration: -p- -T4, nikto, "
           "dir-busting, NSE vuln scripts, and an active web crawl. It is LOUD and "
           "can crash fragile services — only choose it if your written "
-          "authorization covers that level of intrusiveness. (ctfauto never "
+          "authorization covers that level of intrusiveness. (vantage never "
           "exploits anything on either profile.)")
     try:
         ans = input(f"{C.YELLOW}Use the full LAB (loud enumeration) profile for "
@@ -530,11 +530,11 @@ def main(argv=None) -> int:
     if cfg.max_time:
         info(f"global time budget: {cfg.max_time}s for the whole run")
 
-    banner(f"ctfauto {__version__}")
+    banner(f"Vantage {__version__}")
     missing = [t for t, path in cfg.discovered_tools.items() if not path]
     if missing:
         warn("Missing tools (steps using them will be skipped): " + ", ".join(missing)
-             + f"  — run `ctfauto --check` for install hints.")
+             + f"  — run `vantage --check` for install hints.")
     os.makedirs(cfg.out_dir, exist_ok=True)
 
     # Initialise the NDJSON event log (issue #25) for this run.
@@ -598,7 +598,7 @@ def main(argv=None) -> int:
     event(cfg, "enum_done", findings=len(enum_res.findings))
 
     banner("PHASE 3 — EXPLOIT IDENTIFICATION (report-only)")
-    # ctfauto is a recon/enumeration tool: it IDENTIFIES candidate exploits and
+    # vantage is a recon/enumeration tool: it IDENTIFIES candidate exploits and
     # known CVEs for the report, but never fires anything. The candidate list is
     # informational — use it as a starting point for manual, authorized testing.
     exp_res = exploit.identify(cfg, host, enum_res)

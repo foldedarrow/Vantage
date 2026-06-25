@@ -1,22 +1,22 @@
-# ctfauto
+# vantage
 
 Automated **recon → enumeration → exploit-identification → report** tool for
 machines you own or are explicitly authorized to test — HackTheBox boxes over the
 HTB VPN, Metasploitable 2, and other lab VMs on your own network.
 
-ctfauto is a **recon and enumeration tool**. It maps the target, enumerates every
+vantage is a **recon and enumeration tool**. It maps the target, enumerates every
 service it finds, and identifies candidate exploits and known CVEs — then writes a
 report. **It never exploits anything.** The exploit candidates in the report are
 informational: a starting point for manual, authorized testing.
 
 > ⚠️ **Authorization.** Recon and enumeration send real, active scan traffic at
 > the target (nmap, dir brute-forcing, NSE vuln scripts, web crawling). Only point
-> ctfauto at systems you own or have explicit written permission to test. Scanning
+> vantage at systems you own or have explicit written permission to test. Scanning
 > systems you don't control is illegal in most jurisdictions.
 
 ## How it works at a glance
 
-ctfauto is a CLI that orchestrates the standard Kali toolchain (nmap, gobuster,
+vantage is a CLI that orchestrates the standard Kali toolchain (nmap, gobuster,
 nikto, searchsploit, …) rather than reimplementing it — it's stdlib-only itself
 and skips any step whose tool is missing. A run moves through four phases:
 
@@ -66,19 +66,19 @@ The report opens with a **Priority leads** section — a ranked "try these first
 worklist (known RCE → unauthenticated/anonymous access → known CVEs → default
 creds) distilled from every phase.
 
-**CIDR sweep.** Give it a range (`10.10.0.0/24`) and ctfauto ping-sweeps for live
+**CIDR sweep.** Give it a range (`10.10.0.0/24`) and vantage ping-sweeps for live
 hosts, runs the full pipeline against each, and writes `index_<range>.md` linking
 every per-host report (ranked by candidate count).
 
 **Scope allowlist.** For real engagements, point `--scope-file scope.txt` (or
-`$CTFAUTO_SCOPE` / `~/.config/ctfauto/scope.txt`) at a list of authorized
+`$VANTAGE_SCOPE` / `~/.config/vantage/scope.txt`) at a list of authorized
 CIDRs/IPs/hostnames. When set it's **authoritative**: any target not in the list is
 refused regardless of other flags — so a typo'd or out-of-scope target can't be
 scanned.
 
 ## Safety model
 
-ctfauto does not fire exploits, brute-force credentials, run sqlmap/LFI probes, or
+vantage does not fire exploits, brute-force credentials, run sqlmap/LFI probes, or
 test default credentials. Those have all been removed. What remains is active
 *reconnaissance*, and the report it produces — so the safety model is about **who
 you're allowed to scan**, not about gating an attack.
@@ -88,7 +88,7 @@ you're allowed to scan**, not about gating an attack.
 public/unknown IP):
 
 - **`external` targets are refused by default.** Recon/enum sends real scan
-  traffic, so ctfauto won't touch a public/unknown IP unless you pass
+  traffic, so vantage won't touch a public/unknown IP unless you pass
   `--allow-external`, asserting written authorization. On `--profile auto` it then
   **prompts** you to choose the cautious *gentle* profile or the loud *lab*
   profile; pass `--profile lab` to opt into the loud profile directly.
@@ -96,14 +96,14 @@ public/unknown IP):
   lab/release arenas and your tun0 handout, plus `10.129.0.0/16`) are auto-forced
   to the **gentle** profile: top-1000 ports, `-T2`, no nikto, no active web stage,
   and `--aggressive` is ignored. Add custom ranges (Pro Labs, home lab) in
-  `~/.config/ctfauto/networks.json` (`{"htb": [...], "lab": [...]}`).
+  `~/.config/vantage/networks.json` (`{"htb": [...], "lab": [...]}`).
 - **Own a box inside the HTB range?** A local Metasploitable at `10.10.10.104`
   would otherwise be misclassified `htb` and force-gentled. Declare your range as
   lab and it's classified `lab` (full enumeration, `--aggressive` honoured) —
   operator lab declarations take precedence over the built-in HTB ranges:
   - one-off: `--lab-net 10.10.10.0/24` (repeatable)
-  - persistent: `~/.config/ctfauto/networks.json` → `{"lab": ["10.10.10.0/24"]}`
-- ctfauto refuses to scan **your own VPN client IP** (tun0 handout range) as a
+  - persistent: `~/.config/vantage/networks.json` → `{"lab": ["10.10.10.0/24"]}`
+- vantage refuses to scan **your own VPN client IP** (tun0 handout range) as a
   target.
 - The Markdown report **redacts obvious secrets** (passwords, private keys, AWS
   keys); the raw, unredacted data stays in the gitignored JSON/loot.
@@ -120,7 +120,7 @@ tools are installed and the exact install command for whatever's missing.
    (`--script vuln,smb-vuln-*,ssl-enum-ciphers`), grouped per-port in the report.
    - **Connect-scan fallback:** if a SYN scan comes back with everything
      `tcpwrapped` (common when a hypervisor NAT/virtual NIC mangles half-open
-     connections), ctfauto automatically re-scans the open ports with a TCP
+     connections), vantage automatically re-scans the open ports with a TCP
      connect scan (`-sT -sV`) and keeps the richer result. Force it from the start
      with `--connect` / `-sT`.
 2. **Enumeration** (per-service, run **concurrently**):
@@ -137,7 +137,7 @@ tools are installed and the exact install command for whatever's missing.
    findings, and **version-matched Exploit-DB correlation** via
    `searchsploit --json`. NSE-flagged CVEs are **bridged** to curated exploits, so
    a known bug is still listed even when the service banner was empty. Everything
-   here is informational — ctfauto fires nothing.
+   here is informational — vantage fires nothing.
 4. **Report** — Markdown + JSON. The exploit candidates are clearly marked as
    *not run*, intended as leads for manual follow-up. An incremental
    `events_<target>.ndjson` event log is written for automation/re-analysis.
@@ -175,7 +175,7 @@ sudo python3 run.py 10.0.0.5 --stealth \
 
 ## Cloud recon (unauthenticated misconfiguration discovery)
 
-ctfauto can enumerate **publicly-exposed** cloud storage for a target — the cloud
+vantage can enumerate **publicly-exposed** cloud storage for a target — the cloud
 equivalent of the host recon above. It probes only resources the provider has
 already made reachable to anonymous requests, and never touches private resources,
 credentials, or IAM.
@@ -208,7 +208,7 @@ packages.
 > **Lab networking tip:** if you run your VMs under a hypervisor (Parallels,
 > VMware, VirtualBox), put the Kali VM on **bridged** networking, not NAT/Shared.
 > NAT gives Kali a private hypervisor IP, which can make SYN scans return
-> `tcpwrapped`. (ctfauto's `-sT` fallback works around the scan half, but bridged
+> `tcpwrapped`. (vantage's `-sT` fallback works around the scan half, but bridged
 > is the proper fix.)
 
 ## Usage
@@ -262,12 +262,12 @@ own lab range, repeatable — overrides built-in HTB classification),
 
 ### Wordlists & SecLists
 
-ctfauto uses [SecLists](https://github.com/danielmiessler/SecLists) wherever it
+vantage uses [SecLists](https://github.com/danielmiessler/SecLists) wherever it
 helps — directory/file brute-forcing, vhost discovery, and parameter discovery
 prefer SecLists and fall back to smaller system lists (dirb, rockyou, metasploit)
 when it isn't present. It finds SecLists automatically (`/usr/share/seclists`,
 `/usr/share/SecLists`, `/opt`, `~/`); override with `--seclists-dir PATH` or
-`$CTFAUTO_SECLISTS`. Run `ctfauto --check` to see the resolved root and which list
+`$VANTAGE_SECLISTS`. Run `vantage --check` to see the resolved root and which list
 maps to each purpose.
 
 ## Output
@@ -284,10 +284,10 @@ Per target, written to the output dir (`loot/` by default):
 ## Layout
 
 ```
-ctfauto/
+vantage/
   run.py                  # entry point
   setup.sh                # toolchain installer (Kali)
-  ctfauto/
+  vantage/
     cli.py                # arg parsing, authorization gate, phase orchestration
     config.py             # profiles, target classification, tool detection
     util.py               # logging, safe command runner, time budget

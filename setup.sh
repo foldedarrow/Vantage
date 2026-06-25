@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# ctfauto toolchain bootstrap for Kali/Debian. Installs the external CLI tools
-# ctfauto orchestrates. Re-run any time; apt is idempotent.
+# vantage toolchain bootstrap for Kali/Debian. Installs the external CLI tools
+# vantage orchestrates. Re-run any time; apt is idempotent.
 #
 #   sudo ./setup.sh
 #
-# After this, run `python run.py --check` (or `ctfauto --check`) to see what's
+# After this, run `python run.py --check` (or `vantage --check`) to see what's
 # present and what's still missing.
 set -euo pipefail
 
@@ -26,7 +26,7 @@ apt-get update -y
 echo "[*] installing CLI toolchain"
 apt-get install -y "${APT_PKGS[@]}" || {
   echo "[!] some apt packages failed (name drift across distros is normal)."
-  echo "    Re-run 'ctfauto --check' to see what's still missing."
+  echo "    Re-run 'vantage --check' to see what's still missing."
 }
 
 # pipx-installed tools not always in apt

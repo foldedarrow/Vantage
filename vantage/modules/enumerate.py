@@ -327,7 +327,7 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         # to avoid flooding the report with false hits.
         rc, base_code, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
                                 "-o", "/dev/null", "-w", "%{http_code}",
-                                f"{base}/ctfauto-nonexistent-{svc.port}.html"], timeout=15)
+                                f"{base}/vantage-nonexistent-{svc.port}.html"], timeout=15)
         soft404 = base_code.strip() in ("200", "301", "302")
         if soft404:
             info(f"{base} soft-404s (success on a missing path); skipping quick-win path checks")
@@ -352,12 +352,12 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         for path in ("swagger.json", "openapi.json", "api-docs", "v2/api-docs",
                      "swagger-ui.html", "graphql", "api", "actuator", "actuator/env"):
             rc, body, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
-                               "-w", "\n__CTFAUTO_HTTP__%{http_code}",
+                               "-w", "\n__VANTAGE_HTTP__%{http_code}",
                                f"{base}/{path}"], timeout=15)
             # The status code is appended after the body by curl's -w; split it off.
             code = ""
-            if "__CTFAUTO_HTTP__" in body:
-                body, _, code = body.rpartition("__CTFAUTO_HTTP__")
+            if "__VANTAGE_HTTP__" in body:
+                body, _, code = body.rpartition("__VANTAGE_HTTP__")
                 code = code.strip()
             # Only a genuine 200 is an exposed schema. 404/401/403 (including error
             # pages that reflect the requested path) are not — skip them.

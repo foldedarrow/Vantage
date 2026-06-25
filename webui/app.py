@@ -1,15 +1,15 @@
-"""ctfauto web dashboard — a READ-ONLY viewer over the loot/ output directory.
+"""vantage web dashboard — a READ-ONLY viewer over the loot/ output directory.
 
-It runs NO scans and changes nothing on disk. It reads the artifacts ctfauto
+It runs NO scans and changes nothing on disk. It reads the artifacts vantage
 already writes (report_*.json / .md, events_*.ndjson, index_*.md) and renders
 them: a target overview with the ranked priority leads, the full report as HTML,
 and the run's event timeline.
 
 Run it:
     pip install -r webui/requirements.txt
-    CTFAUTO_LOOT=/path/to/loot python webui/app.py      # or just `python webui/app.py`
+    VANTAGE_LOOT=/path/to/loot python webui/app.py      # or just `python webui/app.py`
 
-Then open http://127.0.0.1:5000. Point it at a loot dir with $CTFAUTO_LOOT or
+Then open http://127.0.0.1:5000. Point it at a loot dir with $VANTAGE_LOOT or
 --loot; it defaults to ./loot.
 """
 from __future__ import annotations
@@ -27,12 +27,12 @@ import time
 from flask import Flask, abort, render_template, jsonify, request, redirect, url_for
 import markdown as md
 
-# Make the ctfauto package importable so we reuse its canonical lead-ranking
+# Make the vantage package importable so we reuse its canonical lead-ranking
 # instead of duplicating it here (single source of truth).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
-from ctfauto.modules.report import _priority_leads  # noqa: E402
+from vantage.modules.report import _priority_leads  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 app = Flask(__name__)
@@ -55,8 +55,8 @@ LIVE_STALE_SECONDS = 90
 
 
 def loot_dir() -> str:
-    return app.config.get("LOOT_DIR") or os.environ.get("CTFAUTO_LOOT") or \
-        os.path.join(os.getcwd(), "loot")
+    return app.config.get("LOOT_DIR") or os.environ.get("VANTAGE_LOOT") \
+        or os.environ.get("CTFAUTO_LOOT") or os.path.join(os.getcwd(), "loot")
 
 
 def _safe_path(*parts: str) -> str:
@@ -119,7 +119,7 @@ def _load_report_json(slug: str) -> dict | None:
 
 
 def _leads(data: dict) -> list[str]:
-    """Reuse ctfauto's canonical ranking by reconstructing the minimal shapes it
+    """Reuse vantage's canonical ranking by reconstructing the minimal shapes it
     reads (host.nse_cves, enum.findings[.tags/.service_port/.summary],
     exploits.candidates[.high_confidence/.msf_module/.port/.title/.category])."""
     host = SimpleNamespace(nse_cves=(data.get("host", {}) or {}).get("nse_cves", []) or [])
@@ -432,15 +432,15 @@ def _is_root() -> bool:
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description="ctfauto read-only web dashboard")
-    p.add_argument("--loot", default="", help="Path to the loot dir (else $CTFAUTO_LOOT or ./loot)")
+    p = argparse.ArgumentParser(description="vantage read-only web dashboard")
+    p.add_argument("--loot", default="", help="Path to the loot dir (else $VANTAGE_LOOT or ./loot)")
     p.add_argument("--host", default="127.0.0.1", help="Bind host (default: localhost only)")
     p.add_argument("--port", type=int, default=5000)
     p.add_argument("--debug", action="store_true")
     args = p.parse_args(argv)
     if args.loot:
         app.config["LOOT_DIR"] = args.loot
-    print(f"[ctfauto-webui] serving loot from: {loot_dir()}")
+    print(f"[vantage-webui] serving loot from: {loot_dir()}")
     app.run(host=args.host, port=args.port, debug=args.debug)
 
 

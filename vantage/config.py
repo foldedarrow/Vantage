@@ -1,4 +1,4 @@
-"""Configuration, profiles, and the safety/scope guard for ctfauto."""
+"""Configuration, profiles, and the safety/scope guard for vantage."""
 from __future__ import annotations
 
 import ipaddress
@@ -22,7 +22,7 @@ LAB_NETWORKS = [
 # Broadened from the original three /24-ish ranges: HTB machine/lab traffic
 # appears across 10.10.0.0/16 (labs, release arena, seasonal) and 10.129.0.0/16
 # (the main machine pool). Pro Lab / Enterprise ranges vary per lab — add yours
-# to ~/.config/ctfauto/networks.json (key "htb") and it'll be merged in.
+# to ~/.config/vantage/networks.json (key "htb") and it'll be merged in.
 HTB_NETWORKS = [
     ipaddress.ip_network("10.10.0.0/16"),    # labs, release arena, starting point, tun handouts
     ipaddress.ip_network("10.129.0.0/16"),   # main active-machine pool
@@ -38,12 +38,17 @@ OWN_VPN_HINT_NETWORKS = [
 
 
 def _load_user_networks() -> dict:
-    """Merge user-supplied network overrides from ~/.config/ctfauto/networks.json.
+    """Merge user-supplied network overrides from ~/.config/vantage/networks.json.
     Format: {"htb": ["10.13.37.0/24"], "lab": ["192.168.10.0/24"]}.
     Silently ignored if absent or malformed — never blocks a run."""
     import json
     import os
-    path = os.path.expanduser("~/.config/ctfauto/networks.json")
+    # New location, with back-compat for the old ctfauto config dir.
+    path = os.path.expanduser("~/.config/vantage/networks.json")
+    if not os.path.exists(path):
+        legacy = os.path.expanduser("~/.config/ctfauto/networks.json")
+        if os.path.exists(legacy):
+            path = legacy
     extra = {"htb": [], "lab": []}
     if not os.path.exists(path):
         return extra
@@ -162,7 +167,7 @@ class RunConfig:
     scope_file: str = ""             # engagement allowlist; when set, target must match
     profile_is_auto: bool = True     # True if --profile auto (gate may prompt for external upgrade)
     events_path: str = ""            # NDJSON event log path (issue #25); "" = disabled
-    seclists_dir: str = ""           # override SecLists root (else auto-detect / $CTFAUTO_SECLISTS)
+    seclists_dir: str = ""           # override SecLists root (else auto-detect / $VANTAGE_SECLISTS)
     # --- cloud recon (unauthenticated public-misconfig discovery) -------------
     cloud: bool = False              # run the cloud recon phase
     allow_cloud: bool = False        # explicit authorization to enumerate cloud targets
@@ -175,15 +180,22 @@ class RunConfig:
 def load_scope(explicit: str = "") -> list:
     """Load an authorized-target scope list (engagement allowlist).
 
-    Sources, in order: explicit path (--scope-file) → $CTFAUTO_SCOPE →
-    ~/.config/ctfauto/scope.txt. One entry per line; '#' comments and blank lines
+    Sources, in order: explicit path (--scope-file) → $VANTAGE_SCOPE →
+    ~/.config/vantage/scope.txt. One entry per line; '#' comments and blank lines
     ignored. Each entry is a CIDR, single IP, or a hostname (matched literally).
     Returns a list of (kind, value) where kind is 'net' (ip_network) or 'host'
     (lowercased string). An empty list means "no scope file configured" — callers
     treat that as 'scope not enforced', preserving the flag-only behaviour."""
     import os
-    path = explicit or os.environ.get("CTFAUTO_SCOPE", "") or \
-        os.path.expanduser("~/.config/ctfauto/scope.txt")
+    # New env/path, falling back to the legacy ctfauto names for existing setups.
+    path = explicit or os.environ.get("VANTAGE_SCOPE", "") \
+        or os.environ.get("CTFAUTO_SCOPE", "")
+    if not path:
+        for cand in ("~/.config/vantage/scope.txt", "~/.config/ctfauto/scope.txt"):
+            cand = os.path.expanduser(cand)
+            if os.path.exists(cand):
+                path = cand
+                break
     if not path or not os.path.exists(path):
         return []
     entries: list = []
@@ -226,7 +238,7 @@ def classify_target(target: str, extra_lab_nets: list | None = None) -> str:
     Precedence, most-specific operator intent first:
       1. Operator-declared LAB ranges — networks.json "lab" entries and any
          --lab-net values (extra_lab_nets). These WIN over the built-in HTB
-         ranges, so you can tell ctfauto "10.10.10.0/24 is my own VM, not HTB"
+         ranges, so you can tell vantage "10.10.10.0/24 is my own VM, not HTB"
          and it stops force-gentling your lab box (and honours --aggressive).
       2. HTB ranges (built-in + networks.json "htb") — shared infra; HTB rules
          prohibit aggressive scanning, so these force the gentle profile.

@@ -1,4 +1,4 @@
-"""ctfauto regression tests (stdlib unittest — no third-party deps).
+"""vantage regression tests (stdlib unittest — no third-party deps).
 
 These lock in the behaviour of the bugs fixed in the audit: classification
 order, scope gating, dedupe, detection-string robustness, XML resilience, and
@@ -16,14 +16,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from unittest import mock
 
-from ctfauto.config import classify_target, Profile, RunConfig
-from ctfauto.modules import exploit as E
-from ctfauto.modules import recon as R
-from ctfauto.modules import enumerate as EN
-from ctfauto.modules import cloud as CL
-from ctfauto.modules import report as RP
-from ctfauto import wordlists as W
-from ctfauto import util as U
+from vantage.config import classify_target, Profile, RunConfig
+from vantage.modules import exploit as E
+from vantage.modules import recon as R
+from vantage.modules import enumerate as EN
+from vantage.modules import cloud as CL
+from vantage.modules import report as RP
+from vantage import wordlists as W
+from vantage import util as U
 
 
 class TestClassification(unittest.TestCase):
@@ -71,7 +71,7 @@ class TestLabNetCli(unittest.TestCase):
     """--lab-net flows from the CLI through to classification and enables
     --aggressive on a box that would otherwise be force-gentled as HTB."""
     def test_cli_lab_net_reclassifies_and_allows_aggressive(self):
-        from ctfauto import cli
+        from vantage import cli
         cfg = cli.build_config(cli.build_parser().parse_args(
             ["10.10.10.104", "--lab-net", "10.10.10.0/24", "--aggressive"]))
         self.assertEqual(cfg.klass, "lab")
@@ -80,7 +80,7 @@ class TestLabNetCli(unittest.TestCase):
         self.assertEqual(cfg.lab_nets, ("10.10.10.0/24",))
 
     def test_without_lab_net_still_htb(self):
-        from ctfauto import cli
+        from vantage import cli
         cfg = cli.build_config(cli.build_parser().parse_args(
             ["10.10.10.104", "--aggressive"]))
         self.assertEqual(cfg.klass, "htb")
@@ -175,9 +175,11 @@ class TestWordlists(unittest.TestCase):
     """SecLists resolver: root detection, override precedence, fallbacks (#27)."""
 
     def setUp(self):
-        # Reset the module-level cache and any env between tests.
+        # Reset the module-level cache and any env between tests. Pop BOTH the new
+        # and the legacy var, since the resolver falls back to CTFAUTO_SECLISTS.
         W._seclists_root_cache = None
-        self._old_env = os.environ.pop("CTFAUTO_SECLISTS", None)
+        self._old_env = os.environ.pop("VANTAGE_SECLISTS", None)
+        self._old_legacy = os.environ.pop("CTFAUTO_SECLISTS", None)
         # Build a minimal fake SecLists tree.
         self.tmp = tempfile.mkdtemp()
         for rel in (
@@ -194,7 +196,9 @@ class TestWordlists(unittest.TestCase):
     def tearDown(self):
         W._seclists_root_cache = None
         if self._old_env is not None:
-            os.environ["CTFAUTO_SECLISTS"] = self._old_env
+            os.environ["VANTAGE_SECLISTS"] = self._old_env
+        if self._old_legacy is not None:
+            os.environ["CTFAUTO_SECLISTS"] = self._old_legacy
 
     def _cfg(self, seclists_dir=""):
         return RunConfig(target="", profile=Profile.gentle(), seclists_dir=seclists_dir)
@@ -204,7 +208,7 @@ class TestWordlists(unittest.TestCase):
         self.assertEqual(W.seclists_available(cfg), self.tmp)
 
     def test_env_var_detected(self):
-        os.environ["CTFAUTO_SECLISTS"] = self.tmp
+        os.environ["VANTAGE_SECLISTS"] = self.tmp
         self.assertEqual(W.seclists_available(self._cfg()), self.tmp)
 
     def test_dir_wordlist_prefers_seclists(self):
@@ -229,7 +233,7 @@ class TestWordlists(unittest.TestCase):
         # No SecLists anywhere => '' for vhost. Kali ships SecLists at
         # /usr/share/seclists, so we must blank the known-roots list or the
         # resolver finds the real one and this test is non-hermetic (it failed
-        # only on Kali). setUp already clears the cache + $CTFAUTO_SECLISTS.
+        # only on Kali). setUp already clears the cache + $VANTAGE_SECLISTS.
         cfg = self._cfg(seclists_dir="/definitely/not/here")
         with mock.patch.object(W, "_SECLISTS_ROOTS", []):
             self.assertEqual(W.vhost_wordlist(cfg), "")
@@ -581,7 +585,7 @@ class TestCVEBridge(unittest.TestCase):
 class TestExternalProfilePrompt(unittest.TestCase):
     """Authorized external targets prompt for lab-vs-gentle instead of forcing
     gentle. --profile lab / --yes skip the prompt; auto prompts."""
-    from ctfauto import cli as _CLI
+    from vantage import cli as _CLI
 
     def _cfg(self, *extra):
         args = self._CLI.build_parser().parse_args(
@@ -696,7 +700,7 @@ class TestToolDetection(unittest.TestCase):
     """detect_tools must probe the helpers the exploit-id phase gates on, or those
     features silently never fire (sqlmap sweep was dead because of this)."""
     def test_exploit_helpers_are_detected(self):
-        from ctfauto.config import detect_tools
+        from vantage.config import detect_tools
         keys = set(detect_tools().keys())
         for tool in ("sqlmap", "git-dumper", "hydra", "mysql"):
             self.assertIn(tool, keys, tool)
@@ -831,22 +835,22 @@ class TestScopeAllowlist(unittest.TestCase):
         self.f.close()
 
     def test_in_scope_cidr(self):
-        from ctfauto.config import load_scope, target_in_scope
+        from vantage.config import load_scope, target_in_scope
         scope = load_scope(self.f.name)
         self.assertTrue(target_in_scope("10.0.0.50", scope))
 
     def test_out_of_scope_refused(self):
-        from ctfauto.config import load_scope, target_in_scope
+        from vantage.config import load_scope, target_in_scope
         scope = load_scope(self.f.name)
         self.assertFalse(target_in_scope("10.0.1.50", scope))
 
     def test_hostname_in_scope(self):
-        from ctfauto.config import load_scope, target_in_scope
+        from vantage.config import load_scope, target_in_scope
         scope = load_scope(self.f.name)
         self.assertTrue(target_in_scope("box.htb", scope))
 
     def test_empty_scope_allows_all(self):
-        from ctfauto.config import target_in_scope
+        from vantage.config import target_in_scope
         self.assertTrue(target_in_scope("8.8.8.8", []))
 
 
@@ -1143,7 +1147,7 @@ class TestStealth(unittest.TestCase):
         self.assertEqual(EN._ua_args(RunConfig(target="x", profile=Profile.lab())), [])
 
     def test_cli_stealth_overrides_profile(self):
-        from ctfauto import cli
+        from vantage import cli
         cfg = cli.build_config(cli.build_parser().parse_args(
             ["10.0.0.5", "--stealth", "--profile", "lab"]))
         self.assertTrue(cfg.stealth)
@@ -1151,7 +1155,7 @@ class TestStealth(unittest.TestCase):
         self.assertFalse(cfg.profile_is_auto)        # gate won't prompt to widen
 
     def test_cli_stealth_disables_aggressive(self):
-        from ctfauto import cli
+        from vantage import cli
         cfg = cli.build_config(cli.build_parser().parse_args(
             ["10.0.0.5", "--stealth", "--aggressive"]))
         self.assertFalse(cfg.aggressive)
@@ -1222,7 +1226,7 @@ class TestMetasploitableFixes(unittest.TestCase):
         cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
                         discovered_tools={"curl": "/usr/bin/curl"})
         body_404 = ("<title>404 Not Found</title>The requested URL /swagger-ui.html "
-                    "was not found on this server.\n__CTFAUTO_HTTP__404")
+                    "was not found on this server.\n__VANTAGE_HTTP__404")
 
         def fake_run(cmd, **kw):
             # quick-win baseline probe (-o /dev/null -w %{http_code}) -> a real 404
@@ -1245,7 +1249,7 @@ class TestMetasploitableFixes(unittest.TestCase):
         def fake_run(cmd, **kw):
             if "-o" in cmd:                    # quick-win baseline probe
                 return (0, "404", "")
-            return (0, '{"swagger":"2.0","paths":{}}\n__CTFAUTO_HTTP__200', "")
+            return (0, '{"swagger":"2.0","paths":{}}\n__VANTAGE_HTTP__200', "")
 
         with mock.patch.object(EN, "run", side_effect=fake_run):
             out = []

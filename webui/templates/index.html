@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}ctfauto — targets{% endblock %}
+{% block title %}vantage — targets{% endblock %}
 {% block content %}
 
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
@@ -73,8 +73,8 @@
 {% elif not live and not stopped %}
 <div class="empty">
   No reports found in <code>{{ loot }}</code>.<br>
-  Run ctfauto first (e.g. <code>python run.py 192.168.56.101</code>), or point the
-  dashboard at the right loot dir with <code>--loot</code> / <code>$CTFAUTO_LOOT</code>.
+  Run vantage first (e.g. <code>python run.py 192.168.56.101</code>), or point the
+  dashboard at the right loot dir with <code>--loot</code> / <code>$VANTAGE_LOOT</code>.
 </div>
 {% endif %}
 
