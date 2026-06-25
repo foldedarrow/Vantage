@@ -50,8 +50,8 @@ dashboard** (`webui/`) for browsing results.
 ## Quick start
 
 ```bash
-git clone https://github.com/foldedarrow/AutoPentest.git
-cd AutoPentest
+git clone https://github.com/foldedarrow/Vantage.git
+cd Vantage
 sudo ./setup.sh                 # apt/pipx/gem-installs the toolchain (Kali)
 sudo python3 run.py --check     # show the tool + wordlist matrix
 sudo python3 run.py 192.168.56.101   # recon + enum + report (single host)
