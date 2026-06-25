@@ -73,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "permission. On --profile auto you'll be prompted to choose the "
                         "gentle or full lab profile; pass --profile lab to opt into the "
                         "loud profile directly.")
+    p.add_argument("--lab-net", action="append", default=[], metavar="CIDR",
+                   help="Declare a CIDR as your OWN lab range (repeatable). Overrides "
+                        "the built-in HTB classification for that range, so a box in "
+                        "10.10.0.0/16 you actually own (e.g. a local Metasploitable at "
+                        "10.10.10.104) is treated as 'lab' — full enumeration, "
+                        "--aggressive honoured — instead of being force-gentled as HTB "
+                        "shared infra. Persist it instead in ~/.config/ctfauto/"
+                        "networks.json under the \"lab\" key.")
     p.add_argument("--scope-file", default="",
                    help="Path to an engagement scope allowlist (CIDRs/IPs/hostnames, "
                         "one per line, '#' comments). When set, ctfauto REFUSES any "
@@ -209,10 +217,11 @@ def run_doctor(args=None) -> int:
 
 
 # --- scope / authorization ---------------------------------------------------
-def _resolve_and_classify(target: str) -> tuple[str, str]:
+def _resolve_and_classify(target: str, lab_nets: list | None = None) -> tuple[str, str]:
     """Return (klass, resolved_ip_or_target). If target is a hostname, try to
-    resolve it so we classify on the real IP rather than defaulting to external."""
-    klass = classify_target(target)
+    resolve it so we classify on the real IP rather than defaulting to external.
+    `lab_nets` are operator-declared --lab-net ranges that override built-in HTB."""
+    klass = classify_target(target, lab_nets)
     if klass != "external":
         return klass, target
     # target may be a hostname — try to resolve and re-classify on the IP.
@@ -223,7 +232,7 @@ def _resolve_and_classify(target: str) -> tuple[str, str]:
         pass
     try:
         resolved = socket.gethostbyname(target)
-        rklass = classify_target(resolved)
+        rklass = classify_target(resolved, lab_nets)
         if rklass != "external":
             info(f"{target} resolves to {resolved} ({rklass})")
         return rklass, target  # keep hostname as the target label; klass from IP
@@ -378,7 +387,8 @@ def cloud_authorization_gate(cfg: RunConfig, assume_yes: bool) -> bool:
 
 # --- phase orchestration -----------------------------------------------------
 def build_config(args) -> RunConfig:
-    klass, target = _resolve_and_classify(args.target)
+    lab_nets = tuple(getattr(args, "lab_net", []) or [])
+    klass, target = _resolve_and_classify(args.target, list(lab_nets))
 
     # Profile selection.
     #   --profile gentle/lab : explicit, always honoured (even for external).
@@ -434,6 +444,7 @@ def build_config(args) -> RunConfig:
         default_creds=not args.no_default_creds,
         seclists_dir=args.seclists_dir,
         klass=klass,
+        lab_nets=lab_nets,
         allow_external=args.allow_external,
         scope_file=args.scope_file,
         cloud=args.cloud,
@@ -444,6 +455,9 @@ def build_config(args) -> RunConfig:
         cloud_candidate_cap=args.cloud_cap,
     )
 
+    if lab_nets and klass == "lab":
+        info(f"--lab-net: {target} is in an operator-declared lab range — "
+             "classified 'lab' (overrides built-in HTB), full enumeration enabled.")
     if args.aggressive and klass == "htb":
         warn("--aggressive ignored: target is HTB shared infra.")
     if args.aggressive and klass == "external" and not args.allow_external:
@@ -477,7 +491,7 @@ def run_host_sweep(cfg: RunConfig, args) -> int:
             break
         banner(f"HOST {ip}")
         hcfg = dataclasses.replace(
-            cfg, target=ip, hostname="", klass=classify_target(ip),
+            cfg, target=ip, hostname="", klass=classify_target(ip, list(cfg.lab_nets)),
             events_path=os.path.join(cfg.out_dir, f"events_{ip}.ndjson"),
         )
         events_init(hcfg.events_path)

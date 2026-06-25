@@ -157,6 +157,7 @@ class RunConfig:
     default_creds: bool = True       # flag known default-cred pairs in the report (identify-only)
     # --- scope / authorization (issues #1, #2, #4) ----------------------------
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
+    lab_nets: tuple = ()             # operator-declared lab CIDRs (--lab-net); beat built-in HTB
     allow_external: bool = False     # explicit opt-in to actively touch an external target
     scope_file: str = ""             # engagement allowlist; when set, target must match
     profile_is_auto: bool = True     # True if --profile auto (gate may prompt for external upgrade)
@@ -219,12 +220,20 @@ def target_in_scope(target: str, scope: list) -> bool:
     return False
 
 
-def classify_target(target: str) -> str:
+def classify_target(target: str, extra_lab_nets: list | None = None) -> str:
     """Return 'htb', 'lab', or 'external' for a target IP/host.
 
-    HTB is checked BEFORE lab on purpose: HTB ranges are carved out of 10/8,
-    so checking lab first would misclassify HTB machines as lab and hand them
-    the aggressive profile. User overrides from networks.json are merged in.
+    Precedence, most-specific operator intent first:
+      1. Operator-declared LAB ranges — networks.json "lab" entries and any
+         --lab-net values (extra_lab_nets). These WIN over the built-in HTB
+         ranges, so you can tell ctfauto "10.10.10.0/24 is my own VM, not HTB"
+         and it stops force-gentling your lab box (and honours --aggressive).
+      2. HTB ranges (built-in + networks.json "htb") — shared infra; HTB rules
+         prohibit aggressive scanning, so these force the gentle profile.
+      3. Built-in RFC1918 LAB ranges.
+    Anything else is 'external'. Note: HTB ranges are carved out of 10/8, so the
+    built-in lab check stays LAST — only an explicit operator declaration (step 1)
+    reclassifies an address that also falls inside an HTB range.
     """
     try:
         ip = ipaddress.ip_address(target)
@@ -240,10 +249,22 @@ def classify_target(target: str) -> str:
             # (cli resolves it and re-classifies on the resolved IP where possible.)
             return "external"
     extra = _load_user_networks()
+    # 1. operator-declared lab ranges (CLI --lab-net + config) beat built-in HTB.
+    cli_lab = []
+    for cidr in (extra_lab_nets or []):
+        try:
+            cli_lab.append(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            pass
+    for net in cli_lab + extra["lab"]:
+        if ip in net:
+            return "lab"
+    # 2. HTB shared infra.
     for net in list(HTB_NETWORKS) + extra["htb"]:
         if ip in net:
             return "htb"
-    for net in list(LAB_NETWORKS) + extra["lab"]:
+    # 3. built-in RFC1918 lab ranges.
+    for net in LAB_NETWORKS:
         if ip in net:
             return "lab"
     return "external"

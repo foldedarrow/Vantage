@@ -46,6 +46,46 @@ class TestClassification(unittest.TestCase):
     def test_hostname_is_external(self):
         self.assertEqual(classify_target("example.com"), "external")
 
+    def test_lab_net_override_beats_htb(self):
+        # An operator-declared lab range wins over the built-in HTB range, so a
+        # box you own in 10.10.0.0/16 (e.g. local Metasploitable) is 'lab'.
+        self.assertEqual(classify_target("10.10.10.104"), "htb")  # default
+        self.assertEqual(
+            classify_target("10.10.10.104", ["10.10.10.0/24"]), "lab")
+
+    def test_lab_net_override_does_not_widen_external(self):
+        # Declaring an unrelated lab range must NOT reclassify a public IP.
+        self.assertEqual(
+            classify_target("8.8.8.8", ["10.10.10.0/24"]), "external")
+
+    def test_lab_net_only_affects_listed_range(self):
+        # Another HTB box outside the declared range stays htb.
+        self.assertEqual(
+            classify_target("10.10.20.5", ["10.10.10.0/24"]), "htb")
+
+    def test_lab_net_bad_cidr_ignored(self):
+        self.assertEqual(classify_target("10.10.10.104", ["not-a-cidr"]), "htb")
+
+
+class TestLabNetCli(unittest.TestCase):
+    """--lab-net flows from the CLI through to classification and enables
+    --aggressive on a box that would otherwise be force-gentled as HTB."""
+    def test_cli_lab_net_reclassifies_and_allows_aggressive(self):
+        from ctfauto import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(
+            ["10.10.10.104", "--lab-net", "10.10.10.0/24", "--aggressive"]))
+        self.assertEqual(cfg.klass, "lab")
+        self.assertIn("lab", cfg.profile.name)      # auto -> lab profile
+        self.assertTrue(cfg.aggressive)             # no longer HTB-blocked
+        self.assertEqual(cfg.lab_nets, ("10.10.10.0/24",))
+
+    def test_without_lab_net_still_htb(self):
+        from ctfauto import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(
+            ["10.10.10.104", "--aggressive"]))
+        self.assertEqual(cfg.klass, "htb")
+        self.assertFalse(cfg.aggressive)            # HTB blocks aggressive
+
 
 class TestProfileFlags(unittest.TestCase):
     def test_gentle_disables_noisy_enum(self):

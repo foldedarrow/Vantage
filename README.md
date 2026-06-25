@@ -97,6 +97,12 @@ public/unknown IP):
   to the **gentle** profile: top-1000 ports, `-T2`, no nikto, no active web stage,
   and `--aggressive` is ignored. Add custom ranges (Pro Labs, home lab) in
   `~/.config/ctfauto/networks.json` (`{"htb": [...], "lab": [...]}`).
+- **Own a box inside the HTB range?** A local Metasploitable at `10.10.10.104`
+  would otherwise be misclassified `htb` and force-gentled. Declare your range as
+  lab and it's classified `lab` (full enumeration, `--aggressive` honoured) —
+  operator lab declarations take precedence over the built-in HTB ranges:
+  - one-off: `--lab-net 10.10.10.0/24` (repeatable)
+  - persistent: `~/.config/ctfauto/networks.json` → `{"lab": ["10.10.10.0/24"]}`
 - ctfauto refuses to scan **your own VPN client IP** (tun0 handout range) as a
   target.
 - The Markdown report **redacts obvious secrets** (passwords, private keys, AWS
@@ -234,9 +240,10 @@ python3 run.py 10.0.0.5 \
 **Intensity:** `--aggressive` (loudest, most thorough enumeration — lab only),
 `--no-default-creds` (skip flagging known default-cred pairs in the report).
 
-**Scope / profile:** `--profile auto|lab|gentle`, `--allow-external` (authorize a
-public IP — prompts for profile on `auto`), `--yes` (skip the auth prompt,
-lab/HTB only).
+**Scope / profile:** `--profile auto|lab|gentle`, `--lab-net CIDR` (declare your
+own lab range, repeatable — overrides built-in HTB classification),
+`--allow-external` (authorize a public IP — prompts for profile on `auto`),
+`--yes` (skip the auth prompt, lab/HTB only).
 
 **Scanning:** `--connect` / `-sT` (force TCP connect scan), `--no-udp`,
 `--no-nse-vuln`, `--max-time <sec>` (global wall-clock budget), `-j N`

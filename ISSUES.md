@@ -392,11 +392,19 @@ signature backdoors but had real gaps and a false positive. Suite **144 green**.
   `test_extra_ports_include_distcc`, `test_extra_port_sweep_merges_new_services`.
 - **Duplicate SMB listing RESOLVED** — 139 and 445 are one Samba instance; enum
   now runs once (prefers 445). Tests: `test_smb_enumerated_once_when_both_ports_open`.
-- **Profile note** — the box was throttled to `gentle` only because 10.10.10.x
-  overlaps HTB's range. For a local Metasploitable, run with `--profile lab` (or
-  `--aggressive`) to enable full TCP, active web crawl (DVWA/phpMyAdmin/Mutillidae
-  discovery), nikto, NSE, and UDP. The fixes above harden the gentle path; the lab
-  profile remains the right call for an owned VM.
+- **HTB misclassification of an owned box RESOLVED** — a local Metasploitable at
+  10.10.10.104 was classified `htb` (it overlaps HTB's built-in 10.10.0.0/16),
+  force-gentling it and ignoring `--aggressive`. The `networks.json` "lab" override
+  existed but was shadowed (HTB checked first). `classify_target` now checks
+  operator-declared lab ranges (config "lab" key + new repeatable `--lab-net CIDR`
+  flag) BEFORE the built-in HTB ranges, so you can declare your own range and get
+  full enumeration + `--aggressive`. Built-in lab stays last (HTB users are
+  unaffected unless they explicitly opt out). Tests: `TestClassification`
+  (lab-net cases), `TestLabNetCli`.
+  - One-off:  `ctfauto 10.10.10.104 --lab-net 10.10.10.0/24 --aggressive`
+  - Persist:  `~/.config/ctfauto/networks.json` → `{"lab": ["10.10.10.0/24"]}`
+  - (`--profile lab` already forced the full enumeration intensity, but kept the
+    "htb" label and the aggressive block; `--lab-net` fixes the classification.)
 
 ---
 
