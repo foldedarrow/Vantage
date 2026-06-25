@@ -142,7 +142,13 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
         elif name == "ftp" or svc.port == 21:
             _enum_ftp(cfg, svc, local)
         elif name in ("microsoft-ds", "netbios-ssn", "smb") or svc.port in (139, 445):
-            _enum_smb(cfg, svc, local)
+            # 139 and 445 are the same Samba instance — enumerate it once (prefer
+            # 445) so the report doesn't carry duplicate share listings.
+            open_ports = {x.port for x in host.all_services}
+            if not (svc.port == 139 and 445 in open_ports):
+                _enum_smb(cfg, svc, local)
+        elif name in ("nfs", "nfs_acl", "mountd") or svc.port == 2049:
+            _enum_nfs(cfg, svc, local)
         elif name == "snmp" or svc.port == 161:
             _enum_snmp(cfg, svc, local)
         elif name == "ssh" or svc.port == 22:
@@ -288,12 +294,26 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
                                            tags={"path": path}))
 
     # 2b. API / Swagger surface discovery (read-only GETs of well-known endpoints).
-    #     An exposed schema/Swagger UI maps the whole API attack surface.
+    #     An exposed schema/Swagger UI maps the whole API attack surface. We must
+    #     check the STATUS CODE, not just the body: Apache/Tomcat 404 pages echo the
+    #     requested path back ("/swagger-ui.html was not found on this server"), so a
+    #     body-only substring match flags a plain 404 as an exposed Swagger UI — a
+    #     false positive that fired on Metasploitable's :80 and :8180. Require 200.
     if _have(cfg, "curl", quiet=True):
         for path in ("swagger.json", "openapi.json", "api-docs", "v2/api-docs",
                      "swagger-ui.html", "graphql", "api", "actuator", "actuator/env"):
             rc, body, _ = run(["curl", "-sk", *_ua_args(cfg), "--max-time", "10",
+                               "-w", "\n__CTFAUTO_HTTP__%{http_code}",
                                f"{base}/{path}"], timeout=15)
+            # The status code is appended after the body by curl's -w; split it off.
+            code = ""
+            if "__CTFAUTO_HTTP__" in body:
+                body, _, code = body.rpartition("__CTFAUTO_HTTP__")
+                code = code.strip()
+            # Only a genuine 200 is an exposed schema. 404/401/403 (including error
+            # pages that reflect the requested path) are not — skip them.
+            if code != "200":
+                continue
             low = body.lower()
             if any(k in low for k in ('"swagger"', '"openapi"', '"paths"',
                                       "swagger-ui", '"__schema"', '"_links"', '"activeprofiles"')):
@@ -511,6 +531,26 @@ def _enum_smb(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         if rc == 0 and ls.strip():
             out.append(EnumFinding(svc.port, "smbclient", f"share '{share}' readable (null session)",
                                    ls.strip()[:1500], tags={"smb_share": share}))
+
+
+# --- NFS ----------------------------------------------------------------------
+def _enum_nfs(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """List NFS exports via `showmount -e` (queries the portmapper). A share
+    exported to everyone ('*') is a direct file-read / privesc path on lab boxes —
+    mount it and read or plant files. Read-only; we don't mount anything."""
+    if not _have(cfg, "showmount", quiet=True):
+        return
+    rc, mounts, _ = run(["showmount", "-e", cfg.target], timeout=45)
+    lines = [l.strip() for l in mounts.splitlines()
+             if l.strip() and not l.lower().startswith("export list")]
+    if not lines:
+        return
+    world = any("*" in l or "everyone" in l.lower() for l in lines)
+    out.append(EnumFinding(
+        svc.port, "showmount",
+        f"{len(lines)} NFS export(s)" + (" — world-readable (*)" if world else ""),
+        "\n".join(lines)[:1500],
+        tags={"nfs_exports": True, "nfs_world": world}))
 
 
 # --- SNMP --------------------------------------------------------------------

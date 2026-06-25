@@ -355,6 +355,51 @@ in the gitignored JSON/loot.
 
 ---
 
+## Field-test fixes — run 5 (Metasploitable 2 report review)
+
+Review of a `gentle`-profile run against Metasploitable 2 (10.10.10.104, which
+falls in the HTB range so it was auto-throttled). Findings were good on the three
+signature backdoors but had real gaps and a false positive. Suite **144 green**.
+
+- **api-discovery 404 false positive RESOLVED** — `_enum_http` flagged
+  `/swagger-ui.html` as "API schema/endpoint exposed" on a plain 404 because
+  Apache/Tomcat error pages *echo the requested path* and the body-only check
+  matched `swagger-ui`. Now appends `%{http_code}` via curl `-w` and requires a
+  genuine **200**. Tests: `test_api_discovery_ignores_404_reflecting_path`,
+  `test_api_discovery_flags_real_200`.
+- **Open bind shell as top lead RESOLVED** — :1524 (Metasploitable root shell)
+  was in the service table but absent from Priority leads despite being instant
+  root with no exploit. New `category="shell"` signature + a tier-0
+  `**Instant root**` lead that ranks above curated RCE. rsh (:514 `shell`) is
+  explicitly excluded. Tests: `test_bindshell_signature_and_top_lead`,
+  `test_rsh_is_not_a_bind_shell`.
+- **searchsploit generic-name noise RESOLVED** — :513 `login` (rlogin) produced
+  441 unrelated CMS SQLi hits. Berkeley r-service / bare names added to
+  `_GENERIC_SERVICE_NAMES`, plus a version-less flood cap (>25 hits, no version →
+  skip). r-services now get a dedicated trust-abuse lead. Tests:
+  `test_rservice_names_not_searchsploited`.
+- **Default-cred coverage RESOLVED** — added PostgreSQL (:5432), VNC (:5900), and
+  Telnet (:23) to the curated default-cred checks with runnable commands (psql /
+  vncviewer / hydra). Tests: `test_postgres_vnc_telnet_default_creds`,
+  `test_postgres_command_runnable`.
+- **NFS enumeration RESOLVED** — :2049 was never enumerated; new `_enum_nfs` runs
+  `showmount -e` and flags world-readable (`*`) exports as an anon-access lead.
+  Tests: `test_nfs_world_export_flagged_and_lead`.
+- **Extra-port coverage RESOLVED** — quiet `--top-ports 1000` profiles silently
+  missed distcc 3632 (not in nmap's top-1000). `recon.EXTRA_TCP_PORTS` +
+  `_scan_extra_ports` sweep a curated set of high-value ports outside top-1000 and
+  merge them in before NSE (skipped on full_tcp / stealth). Tests:
+  `test_extra_ports_include_distcc`, `test_extra_port_sweep_merges_new_services`.
+- **Duplicate SMB listing RESOLVED** — 139 and 445 are one Samba instance; enum
+  now runs once (prefers 445). Tests: `test_smb_enumerated_once_when_both_ports_open`.
+- **Profile note** — the box was throttled to `gentle` only because 10.10.10.x
+  overlaps HTB's range. For a local Metasploitable, run with `--profile lab` (or
+  `--aggressive`) to enable full TCP, active web crawl (DVWA/phpMyAdmin/Mutillidae
+  discovery), nikto, NSE, and UDP. The fixes above harden the gentle path; the lab
+  profile remains the right call for an owned VM.
+
+---
+
 ## Field-test fixes — run 4 (root cause: operator's global setg PAYLOAD)
 
 Manual `msfconsole` repro nailed it: the operator's MSF has a GLOBAL default

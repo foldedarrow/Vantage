@@ -126,6 +126,13 @@ def _priority_leads(host, enum, exploits) -> list[str]:
     creds. Returns formatted markdown bullets (most important first)."""
     tiers: list[tuple[int, str]] = []  # (rank, bullet); lower rank = higher priority
 
+    # 0. An open, unauthenticated shell (bind/backdoor shell) — instant access with
+    #    no exploit to run. The single highest-signal lead; ranks above known RCE.
+    for c in getattr(exploits, "candidates", []):
+        if getattr(c, "category", "") == "shell":
+            tiers.append((0, f"**Instant root** · :{c.port} — {c.title} "
+                             "(connect directly, no exploit)"))
+
     # 1. High-confidence exploit leads (curated/NSE-bridged RCE).
     for c in getattr(exploits, "candidates", []):
         if c.high_confidence and c.msf_module:
@@ -156,6 +163,9 @@ def _priority_leads(host, enum, exploits) -> list[str]:
                              "exposed (host takeover)"))
         if t.get("anon_ldap"):
             tiers.append((2, f"**Anon access** · :{f.service_port} — anonymous LDAP bind"))
+        if t.get("nfs_world"):
+            tiers.append((2, f"**Anon access** · :{f.service_port} — world-readable NFS "
+                             "export(s) (mountable by anyone)"))
         if t.get("web_panel"):
             tiers.append((2, f"**Mgmt panel** · :{f.service_port} — {f.summary}"))
 

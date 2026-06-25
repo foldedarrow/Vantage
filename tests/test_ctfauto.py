@@ -1113,5 +1113,147 @@ class TestStealth(unittest.TestCase):
         self.assertFalse(cfg.aggressive)
 
 
+class TestMetasploitableFixes(unittest.TestCase):
+    """Regressions from the Metasploitable 2 report review: bind shell as the top
+    lead, r-services noise, the api-discovery 404 false positive, extra-port
+    coverage, and the newly-covered default-cred protocols."""
+
+    def _cfg(self, **kw):
+        return RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                         default_creds=True, **kw)
+
+    # --- open bind shell (1524) ---------------------------------------------
+    def test_bindshell_signature_and_top_lead(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(1524, "bindshell", product="Metasploitable root shell"),
+                      _svc(21, "ftp", product="vsftpd", version="2.3.4")]
+        cands = E._signature_candidates(h)
+        shell = [c for c in cands if c.category == "shell"]
+        self.assertTrue(shell, [c.title for c in cands])
+        self.assertEqual(shell[0].port, 1524)
+        # ranks ABOVE the vsftpd RCE in the priority leads
+        exp = E.ExploitResult()
+        for c in cands:
+            exp.candidates.append(c)
+        leads = RP._priority_leads(h, EN.EnumResult(), exp)
+        self.assertIn("Instant root", leads[0])
+
+    def test_rsh_is_not_a_bind_shell(self):
+        """Port 514 'shell' (rsh) must NOT be flagged as an open bind shell."""
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(514, "shell", product="Netkit rshd")]
+        cands = E._signature_candidates(h)
+        self.assertFalse([c for c in cands if c.category == "shell"])
+        self.assertTrue([c for c in cands if "r-services" in c.title])
+
+    # --- searchsploit noise --------------------------------------------------
+    def test_rservice_names_not_searchsploited(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"searchsploit": "/usr/bin/searchsploit"})
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(513, "login"), _svc(514, "shell"), _svc(512, "exec")]
+        with mock.patch.object(E, "run") as run_mock:
+            cands = E._searchsploit_candidates(cfg, h)
+        run_mock.assert_not_called()
+        self.assertEqual(cands, [])
+
+    # --- default creds: new protocols ---------------------------------------
+    def test_postgres_vnc_telnet_default_creds(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(5432, "postgresql"), _svc(5900, "vnc"), _svc(23, "telnet")]
+        titles = " ".join(c.title for c in E._default_cred_candidates(self._cfg(), h))
+        self.assertIn("POSTGRESQL", titles)
+        self.assertIn("VNC", titles)
+        self.assertIn("TELNET", titles)
+
+    def test_postgres_command_runnable(self):
+        cmd = E._default_cred_command("postgresql", "10.0.0.1", 5432,
+                                      E._DEFAULT_CREDS["postgresql"])
+        self.assertIn("psql", cmd)
+        self.assertIn("PGPASSWORD", cmd)
+
+    # --- api-discovery 404 false positive -----------------------------------
+    def test_api_discovery_ignores_404_reflecting_path(self):
+        """A 404 whose body echoes '/swagger-ui.html' must not be flagged."""
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"curl": "/usr/bin/curl"})
+        body_404 = ("<title>404 Not Found</title>The requested URL /swagger-ui.html "
+                    "was not found on this server.\n__CTFAUTO_HTTP__404")
+
+        def fake_run(cmd, **kw):
+            # quick-win baseline probe (-o /dev/null -w %{http_code}) -> a real 404
+            # so the soft-404 guard doesn't trigger; every api path returns the
+            # reflecting 404 body above.
+            if "-o" in cmd:
+                return (0, "404", "")
+            return (0, body_404, "")
+
+        with mock.patch.object(EN, "run", side_effect=fake_run):
+            out = []
+            EN._enum_http(cfg, _svc(80, "http"), out)
+        self.assertFalse([f for f in out if f.tool == "api-discovery"],
+                         "404 body reflecting the path was flagged as exposed API")
+
+    def test_api_discovery_flags_real_200(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"curl": "/usr/bin/curl"})
+
+        def fake_run(cmd, **kw):
+            if "-o" in cmd:                    # quick-win baseline probe
+                return (0, "404", "")
+            return (0, '{"swagger":"2.0","paths":{}}\n__CTFAUTO_HTTP__200', "")
+
+        with mock.patch.object(EN, "run", side_effect=fake_run):
+            out = []
+            EN._enum_http(cfg, _svc(80, "http"), out)
+        self.assertTrue([f for f in out if f.tool == "api-discovery"])
+
+    # --- NFS export enumeration ---------------------------------------------
+    def test_nfs_world_export_flagged_and_lead(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"showmount": "/usr/sbin/showmount"})
+        out = []
+        with mock.patch.object(EN, "run",
+                               return_value=(0, "Export list for 10.0.0.1:\n/ *", "")):
+            EN._enum_nfs(cfg, _svc(2049, "nfs"), out)
+        self.assertTrue(out and out[0].tags.get("nfs_world"))
+        enum = EN.EnumResult(); enum.findings.extend(out)
+        leads = RP._priority_leads(R.HostResult(ip="10.0.0.1"), enum, E.ExploitResult())
+        self.assertTrue(any("NFS" in l for l in leads))
+
+    # --- extra-port coverage -------------------------------------------------
+    def test_extra_ports_include_distcc(self):
+        self.assertIn(3632, R.EXTRA_TCP_PORTS)
+        self.assertIn(1524, R.EXTRA_TCP_PORTS)
+
+    def test_extra_port_sweep_merges_new_services(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.gentle(),
+                        discovered_tools={"nmap": "/usr/bin/nmap"})
+        host = R.HostResult(ip="10.0.0.1")
+        host.services = [_svc(80, "http")]
+        found = R.HostResult(ip="10.0.0.1")
+        found.services = [_svc(3632, "distccd")]
+        with mock.patch.object(R, "run", return_value=(0, "", "")), \
+             mock.patch("os.path.exists", return_value=True), \
+             mock.patch.object(R, "parse_nmap_xml", return_value=found):
+            R._scan_extra_ports(cfg, host)
+        self.assertIn(3632, [s.port for s in host.services])
+
+
+class TestSmbSingleEnumeration(unittest.TestCase):
+    """139 and 445 are one Samba instance — enumerate once (prefer 445) so the
+    report doesn't carry the share listing twice."""
+    def test_smb_enumerated_once_when_both_ports_open(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"smbclient": "/usr/bin/smbclient"})
+        host = R.HostResult(ip="10.0.0.1")
+        host.services = [_svc(139, "netbios-ssn"), _svc(445, "microsoft-ds")]
+        calls = []
+        with mock.patch.object(EN, "_enum_smb",
+                               side_effect=lambda c, svc, out: calls.append(svc.port)):
+            EN._enumerate_host_fresh(cfg, host)
+        self.assertEqual(calls, [445], f"SMB enumerated on {calls}, expected [445]")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

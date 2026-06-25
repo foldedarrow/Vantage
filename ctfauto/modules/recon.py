@@ -41,6 +41,25 @@ class HostResult:
         return self.services + self.udp_services
 
 
+# High-value services that sit OUTSIDE nmap's default top-1000, so a quiet
+# (top-ports) scan silently misses them. distcc 3632 is the classic example — a
+# Metasploitable RCE that never shows up on the gentle profile. We always sweep
+# these few extra ports on top-ports profiles so the coverage gap doesn't depend
+# on the operator remembering --profile lab.
+EXTRA_TCP_PORTS = [
+    1090, 1098, 1099,   # Java RMI registry variants
+    1524,               # ingreslock / bind shell
+    3632,               # distccd (CVE-2004-2687)
+    5984,               # CouchDB
+    6660, 6669, 6697,   # IRC(S) variants (UnrealIRCd backdoor)
+    8787,               # Ruby DRb (Metasploitable)
+    9200, 9300,         # Elasticsearch
+    2375, 2376,         # Docker Engine API
+    11211,              # memcached
+    27017,              # MongoDB
+]
+
+
 def _xml_path(cfg: RunConfig) -> str:
     return os.path.join(cfg.out_dir, f"nmap_{cfg.target.replace('/', '_')}.xml")
 
@@ -210,6 +229,33 @@ def _rescan_connect(cfg: RunConfig, host: HostResult) -> HostResult | None:
     return parse_nmap_xml(xml_out)
 
 
+def _scan_extra_ports(cfg: RunConfig, host: HostResult) -> None:
+    """Probe the curated EXTRA_TCP_PORTS (high-value services outside top-1000) and
+    merge any newly-found open services into `host` in place. Quiet: one -sV pass
+    over ~20 ports. Called only on top-ports profiles (full_tcp already covers them
+    via -p-) and never in stealth (keep the packet footprint minimal)."""
+    known = {s.port for s in host.services}
+    extra = [p for p in EXTRA_TCP_PORTS if p not in known]
+    if not extra:
+        return
+    info(f"extra-port sweep: {len(extra)} high-value ports outside top-1000 "
+         "(distcc/RMI/etc.)")
+    xml_out = os.path.join(cfg.out_dir, f"nmap_extra_{cfg.target.replace('/', '_')}.xml")
+    scan_type = ["-sT"] if cfg.connect_scan else []
+    cmd = ["nmap", cfg.profile.nmap_timing, *scan_type, "-Pn", "-sV",
+           "-p", ",".join(str(p) for p in extra), "--open", "-oX", xml_out, cfg.target]
+    rc, _, _ = run(cmd, timeout=600)
+    if not os.path.exists(xml_out):
+        return
+    found = parse_nmap_xml(xml_out)
+    new = [s for s in found.services if s.port not in known]
+    if new:
+        good(f"extra-port sweep found {len(new)} more service(s): "
+             + ", ".join(f"{s.port}/{s.name}" for s in new))
+        host.services.extend(new)
+        host.services.sort(key=lambda s: s.port)
+
+
 def scan(cfg: RunConfig) -> HostResult:
     """Run nmap and parse results into a HostResult. With --resume, reuse a
     cached recon result if one exists (issue #13)."""
@@ -272,6 +318,13 @@ def scan(cfg: RunConfig) -> HostResult:
             host = better
         else:
             warn("connect-scan did not improve results; keeping original scan.")
+
+    # Top-ports profiles miss high-value services outside nmap's top-1000 (distcc
+    # 3632, etc.). Sweep the curated extras and merge them in BEFORE NSE so the
+    # vuln scripts cover them too. Skipped on full_tcp (-p- already has them) and in
+    # stealth (minimise footprint).
+    if not cfg.profile.full_tcp and not cfg.stealth:
+        _scan_extra_ports(cfg, host)
 
     # UDP top-ports pass (lab profile, unless --no-udp). UDP is slow, so keep it small.
     if cfg.profile.udp_scan and not cfg.no_udp:
