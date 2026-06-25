@@ -169,6 +169,17 @@ def _priority_leads(host, enum, exploits) -> list[str]:
         if c.high_confidence and c.msf_module:
             tiers.append((1, f"**RCE** · :{c.port} — {c.title}  (`{c.msf_module}`)"))
 
+    # 1b. Confirmed default credentials (e.g. nikto proving Tomcat Manager
+    #     tomcat:tomcat — that's WAR-deploy RCE, not a guess). Ranks with RCE.
+    for f in getattr(enum, "findings", []):
+        t = f.tags or {}
+        if t.get("confirmed_cred"):
+            where = t.get("cred_path") or t.get("cred_app") or ""
+            tiers.append((1, f"**Confirmed creds** · :{f.service_port} — "
+                             f"{t.get('cred_app', 'service')} "
+                             f"`{t['confirmed_cred']}`"
+                             + (f" at {where}" if t.get("cred_path") else "")))
+
     # 2. Anonymous / unauthenticated access surfaced during enumeration.
     for f in getattr(enum, "findings", []):
         t = f.tags or {}

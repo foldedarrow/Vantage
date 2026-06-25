@@ -245,6 +245,45 @@ def _identify_web_app(ww: str) -> tuple[str, bool, str] | None:
     return None
 
 
+# nikto's most actionable lines, pulled out of the 30-item blob into their own
+# leads. A confirmed default account (e.g. Tomcat Manager tomcat:tomcat = WAR-deploy
+# RCE) is the single highest-signal thing nikto finds and shouldn't be buried.
+_NIKTO_DEFAULT_ACCT = re.compile(
+    r"(/\S*?):\s*Default account found for '([^']+)' at "
+    r"\(ID '([^']*)', PW '([^']*)'\)", re.I)
+# Sensitive admin/data surfaces nikto reports by path → promote to a panel lead.
+_NIKTO_PANELS = [
+    ("/phpmyadmin", "phpMyAdmin",
+     "DB admin panel — try DB default creds (root:<blank>); `searchsploit phpmyadmin`."),
+    ("/admin/login.jsp", "Tomcat admin console",
+     "Tomcat Server Administration login — try default Tomcat creds."),
+]
+
+
+def _nikto_findings(port: int, hits: list[str]) -> list[EnumFinding]:
+    """Extract high-signal leads (confirmed default creds, admin panels) from
+    nikto's '+' lines so they surface as priority leads, not buried in the blob."""
+    out: list[EnumFinding] = []
+    seen_panels: set[str] = set()
+    for line in hits:
+        m = _NIKTO_DEFAULT_ACCT.search(line)
+        if m:
+            path, app, user, pw = m.group(1), m.group(2), m.group(3), m.group(4)
+            cred = f"{user}:{pw}" if (user or pw) else "(blank)"
+            out.append(EnumFinding(
+                port, "nikto", f"CONFIRMED default creds {cred} for {app} at {path}",
+                line.strip(),
+                tags={"confirmed_cred": cred, "cred_app": app, "cred_path": path}))
+        low = line.lower()
+        for needle, name, hint in _NIKTO_PANELS:
+            if needle in low and name not in seen_panels:
+                seen_panels.add(name)
+                out.append(EnumFinding(
+                    port, "nikto", f"{name} exposed", f"{hint}\n{line.strip()}",
+                    tags={"web_panel": True, "panel": name}))
+    return out
+
+
 def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     scheme = "https" if svc.port in (443, 8443) else "http"
     label = _host_label(cfg)
@@ -337,6 +376,8 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         hits = [l for l in nk.splitlines() if l.strip().startswith("+")]
         if hits:
             out.append(EnumFinding(svc.port, "nikto", f"{len(hits)} item(s)", "\n".join(hits)))
+            # Pull confirmed default creds / admin panels out into their own leads.
+            out.extend(_nikto_findings(svc.port, hits))
     elif not cfg.profile.enable_nikto:
         info(f"nikto skipped on {cfg.profile.name} profile (noisy)")
 

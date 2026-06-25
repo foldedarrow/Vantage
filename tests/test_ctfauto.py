@@ -1316,6 +1316,65 @@ class TestSmbSingleEnumeration(unittest.TestCase):
         self.assertEqual(calls, [445], f"SMB enumerated on {calls}, expected [445]")
 
 
+class TestBruteWordlistGz(unittest.TestCase):
+    """hydra can't read a gzipped wordlist; a resolved rockyou.txt.gz must be
+    gunzipped in the suggested command, not pasted as-is."""
+    def test_gz_wordlist_gets_gunzip_prefix(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(), aggressive=True)
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(22, "ssh")]
+        with mock.patch.object(E.wordlists, "username_wordlist", return_value="/u.txt"), \
+             mock.patch.object(E.wordlists, "password_wordlist",
+                               return_value="/usr/share/wordlists/rockyou.txt.gz"):
+            cands = E._brute_candidates(cfg, h)
+        cmd = cands[0].command
+        self.assertIn("gunzip -kf", cmd)
+        self.assertIn("/usr/share/wordlists/rockyou.txt ", cmd + " ")  # points at .txt
+        self.assertNotIn("rockyou.txt.gz -t", cmd)                     # not the .gz
+
+    def test_plain_wordlist_no_prefix(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(), aggressive=True)
+        h = R.HostResult(ip="10.0.0.1"); h.services = [_svc(22, "ssh")]
+        with mock.patch.object(E.wordlists, "username_wordlist", return_value="/u.txt"), \
+             mock.patch.object(E.wordlists, "password_wordlist", return_value="/p.txt"):
+            cands = E._brute_candidates(cfg, h)
+        self.assertNotIn("gunzip", cands[0].command)
+
+
+class TestNiktoLeadExtraction(unittest.TestCase):
+    """nikto's confirmed default accounts + admin panels are pulled into their own
+    findings so they become priority leads, not buried in the blob."""
+    _HITS = [
+        "+ [700124] /manager/html: Default account found for 'Tomcat Manager "
+        "Application' at (ID 'tomcat', PW 'tomcat'). Apache Tomcat. See: CWE-16",
+        "+ [001795] /phpMyAdmin/changelog.php: phpMyAdmin is for managing MySQL.",
+        "+ [013587] /: Suggested security header missing: referrer-policy.",
+    ]
+
+    def test_confirmed_cred_extracted(self):
+        fs = EN._nikto_findings(8180, self._HITS)
+        cred = [f for f in fs if f.tags.get("confirmed_cred")]
+        self.assertTrue(cred)
+        self.assertEqual(cred[0].tags["confirmed_cred"], "tomcat:tomcat")
+        self.assertEqual(cred[0].tags["cred_path"], "/manager/html")
+
+    def test_phpmyadmin_panel_extracted(self):
+        fs = EN._nikto_findings(80, self._HITS)
+        self.assertTrue(any(f.tags.get("panel") == "phpMyAdmin" for f in fs))
+
+    def test_noise_lines_ignored(self):
+        # the security-header line must not produce a finding
+        fs = EN._nikto_findings(80, [self._HITS[2]])
+        self.assertEqual(fs, [])
+
+    def test_confirmed_cred_becomes_top_lead(self):
+        enum = EN.EnumResult()
+        enum.findings.extend(EN._nikto_findings(8180, self._HITS))
+        leads = RP._priority_leads(R.HostResult(ip="10.0.0.1"), enum, E.ExploitResult())
+        self.assertTrue(any("Confirmed creds" in l and "tomcat:tomcat" in l
+                            for l in leads), leads)
+        self.assertTrue(any("phpMyAdmin" in l for l in leads))
+
+
 class TestReportWriteResilience(unittest.TestCase):
     """A report write must never crash the run after a full scan (a stale
     root-owned loot/*.json from an earlier sudo run threw an uncaught
