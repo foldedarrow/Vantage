@@ -10,7 +10,7 @@ from ..config import RunConfig
 from ..modules.recon import HostResult
 from ..modules.enumerate import EnumResult
 from ..modules.exploit import ExploitResult
-from ..util import good
+from ..util import good, warn, err
 
 import re as _re
 
@@ -70,12 +70,43 @@ def _redact(text: str) -> str:
     return out
 
 
+def _safe_write(path: str, content: str, label: str) -> str:
+    """Write `content` to `path`, returning the path actually written. A report
+    write must never crash the run after a full scan — on a permission/OS error we
+    warn with actionable remediation and fall back to a writable temp location so
+    the work isn't lost. Returns '' only if even the fallback fails."""
+    try:
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+    except OSError as e:
+        warn(f"could not write {label} to {path}: {e}")
+        if isinstance(e, PermissionError):
+            warn("This usually means the file was created by an earlier run with "
+                 "different privileges (e.g. sudo). Fix with: "
+                 f"`sudo chown -R $USER {os.path.dirname(path) or '.'}` (or delete "
+                 "the stale file), and run ctfauto with consistent privileges.")
+        import tempfile
+        fb = os.path.join(tempfile.gettempdir(), os.path.basename(path))
+        try:
+            with open(fb, "w") as f:
+                f.write(content)
+            warn(f"{label} written to fallback location instead: {fb}")
+            return fb
+        except OSError as e2:
+            err(f"also failed to write {label} to fallback {fb}: {e2}")
+            return ""
+
+
 def write_reports(cfg: RunConfig, host: HostResult,
                   enum: EnumResult, exploits: ExploitResult) -> tuple[str, str]:
-    os.makedirs(cfg.out_dir, exist_ok=True)
     safe_t = cfg.target.replace("/", "_")
     json_path = os.path.join(cfg.out_dir, f"report_{safe_t}.json")
     md_path = os.path.join(cfg.out_dir, f"report_{safe_t}.md")
+    try:
+        os.makedirs(cfg.out_dir, exist_ok=True)
+    except OSError as e:
+        warn(f"could not create output dir {cfg.out_dir}: {e}")
 
     data = {
         "target": cfg.target,
@@ -88,14 +119,14 @@ def write_reports(cfg: RunConfig, host: HostResult,
         "enumeration": [asdict(f) for f in enum.findings],
         "exploit_candidates": [asdict(c) for c in exploits.candidates],
     }
-    with open(json_path, "w") as f:
-        json.dump(data, f, indent=2)
+    json_path = _safe_write(json_path, json.dumps(data, indent=2), "json report")
+    md_path = _safe_write(md_path, _render_md(cfg, host, enum, exploits),
+                          "markdown report")
 
-    with open(md_path, "w") as f:
-        f.write(_render_md(cfg, host, enum, exploits))
-
-    good(f"report written: {md_path}")
-    good(f"json written:   {json_path}")
+    if md_path:
+        good(f"report written: {md_path}")
+    if json_path:
+        good(f"json written:   {json_path}")
     return md_path, json_path
 
 

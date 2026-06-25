@@ -1316,5 +1316,43 @@ class TestSmbSingleEnumeration(unittest.TestCase):
         self.assertEqual(calls, [445], f"SMB enumerated on {calls}, expected [445]")
 
 
+class TestReportWriteResilience(unittest.TestCase):
+    """A report write must never crash the run after a full scan (a stale
+    root-owned loot/*.json from an earlier sudo run threw an uncaught
+    PermissionError). _safe_write falls back to a writable temp location."""
+
+    def test_safe_write_happy_path(self):
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "out.txt")
+        self.assertEqual(RP._safe_write(p, "data", "report"), p)
+        with open(p) as f:
+            self.assertEqual(f.read(), "data")
+
+    def test_safe_write_falls_back_on_oserror(self):
+        # A directory where a file is expected raises OSError (IsADirectoryError),
+        # exercising the fallback deterministically without special permissions.
+        # Name it like a file so the temp fallback path doesn't collide with it.
+        d = tempfile.mkdtemp()
+        target = os.path.join(d, "report.json")
+        os.mkdir(target)
+        out = RP._safe_write(target, "payload", "report")
+        self.assertTrue(out, "fallback should have produced a path")
+        self.assertNotEqual(out, target)
+        with open(out) as f:
+            self.assertEqual(f.read(), "payload")
+        os.remove(out)
+
+    def test_write_reports_does_not_raise_on_unwritable_outdir(self):
+        # out_dir points at a path under an existing FILE, so makedirs + writes
+        # fail; write_reports must warn and fall back, not raise.
+        tf = tempfile.NamedTemporaryFile(delete=False); tf.close()
+        cfg = RunConfig(target="10.0.0.9", profile=Profile.lab(),
+                        out_dir=os.path.join(tf.name, "loot"))
+        md, js = RP.write_reports(cfg, R.HostResult(ip="10.0.0.9"),
+                                  EN.EnumResult(), E.ExploitResult())
+        # returns (fallback paths), never raised
+        self.assertTrue(md and js)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
