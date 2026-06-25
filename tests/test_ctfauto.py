@@ -1284,6 +1284,23 @@ class TestMetasploitableFixes(unittest.TestCase):
         self.assertIn(3632, [s.port for s in host.services])
 
 
+class TestNfsSingleEnumeration(unittest.TestCase):
+    """NFS registers on 2049 + a dynamic mountd port over TCP and UDP; showmount
+    must run once (canonical lowest TCP port), not per RPC port — else the report
+    carries duplicate exports and leads."""
+    def test_nfs_enumerated_once_across_rpc_ports(self):
+        cfg = RunConfig(target="10.0.0.1", profile=Profile.lab(),
+                        discovered_tools={"showmount": "/usr/sbin/showmount"})
+        host = R.HostResult(ip="10.0.0.1")
+        host.services = [_svc(2049, "nfs"), _svc(59352, "mountd")]
+        host.udp_services = [R.Service(port=2049, proto="udp", name="nfs")]
+        calls = []
+        with mock.patch.object(EN, "_enum_nfs",
+                               side_effect=lambda c, svc, out: calls.append((svc.port, svc.proto))):
+            EN._enumerate_host_fresh(cfg, host)
+        self.assertEqual(calls, [(2049, "tcp")], f"NFS enumerated on {calls}")
+
+
 class TestSmbSingleEnumeration(unittest.TestCase):
     """139 and 445 are one Samba instance — enumerate once (prefer 445) so the
     report doesn't carry the share listing twice."""

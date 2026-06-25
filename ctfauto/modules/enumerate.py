@@ -148,7 +148,17 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
             if not (svc.port == 139 and 445 in open_ports):
                 _enum_smb(cfg, svc, local)
         elif name in ("nfs", "nfs_acl", "mountd") or svc.port == 2049:
-            _enum_nfs(cfg, svc, local)
+            # NFS registers on several RPC ports (2049 + a dynamic mountd port)
+            # over both TCP and UDP. showmount -e queries the portmapper and returns
+            # all exports regardless of which one we hit, so enumerate ONCE — on the
+            # canonical NFS service (lowest port, TCP preferred) — to avoid the
+            # duplicate findings/leads a per-port run produced.
+            nfs_svcs = [x for x in host.all_services
+                        if x.name.lower() in ("nfs", "nfs_acl", "mountd") or x.port == 2049]
+            canonical = min(nfs_svcs,
+                            key=lambda x: (x.port, 0 if x.proto == "tcp" else 1))
+            if svc is canonical:
+                _enum_nfs(cfg, svc, local)
         elif name == "snmp" or svc.port == 161:
             _enum_snmp(cfg, svc, local)
         elif name == "ssh" or svc.port == 22:
