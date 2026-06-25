@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import datetime
 
 from ..config import RunConfig
-from ..modules.recon import HostResult
+from ..modules.recon import HostResult, is_domain_controller, ad_domain
 from ..modules.enumerate import EnumResult
 from ..modules.exploit import ExploitResult
 from ..util import good, warn, err
@@ -205,6 +205,19 @@ def _priority_leads(host, enum, exploits) -> list[str]:
                              "exposed (host takeover)"))
         if t.get("anon_ldap"):
             tiers.append((2, f"**Anon access** · :{f.service_port} — anonymous LDAP bind"))
+        if t.get("asrep_roast"):
+            tiers.append((1, f"**AS-REP roast** · :{f.service_port} — pre-auth-disabled "
+                             "account(s) found; crackable offline with NO credentials"))
+        if t.get("ldap_secret"):
+            tiers.append((1, f"**Cleartext secret** · :{f.service_port} — password-like "
+                             "value in an anonymously-readable LDAP description field"))
+        if t.get("ad_users") or t.get("ldap_users"):
+            n = t.get("ad_users") or t.get("ldap_users")
+            tiers.append((2, f"**AD users** · :{f.service_port} — {n} domain "
+                             "username(s) enumerated (null session / Kerberos)"))
+        if t.get("pass_pol"):
+            tiers.append((2, f"**Password policy** · :{f.service_port} — domain policy "
+                             "readable via null session (gauges spray/lockout risk)"))
         if t.get("nfs_world"):
             tiers.append((2, f"**Anon access** · :{f.service_port} — world-readable NFS "
                              "export(s) (mountable by anyone)"))
@@ -250,6 +263,12 @@ def _render_md(cfg, host, enum, exploits) -> str:
     L.append(f"- **Aggressive:** {cfg.aggressive}")
     if host.os_guess:
         L.append(f"- **OS guess:** {host.os_guess}")
+    if is_domain_controller(host):
+        dom = ad_domain(host) or next(
+            (f.tags.get("ad_domain") for f in enum.findings if f.tags.get("ad_domain")), "")
+        L.append(f"- **Active Directory:** Domain Controller"
+                 + (f" for `{dom}`" if dom else "")
+                 + " (Kerberos + LDAP/GC present)")
     L.append("")
     L.append("> ℹ️ _This is a recon & enumeration report. Vantage does not exploit "
              "anything — the exploit candidates below are informational and intended "

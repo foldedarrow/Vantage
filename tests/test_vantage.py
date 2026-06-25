@@ -1417,5 +1417,237 @@ class TestReportWriteResilience(unittest.TestCase):
         self.assertTrue(md and js)
 
 
+def _adsvc(port, name, product="", version="", extrainfo=""):
+    return R.Service(port=port, proto="tcp", name=name, product=product,
+                     version=version, extrainfo=extrainfo)
+
+
+class TestADDetection(unittest.TestCase):
+    """Domain/DC fingerprinting from nmap banners."""
+    def test_ad_domain_from_ldap_banner(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_adsvc(389, "ldap", product="Microsoft Windows Active Directory LDAP",
+                             extrainfo="Domain: lab.local, Site: Default-First-Site-Name")]
+        self.assertEqual(R.ad_domain(h), "lab.local")
+
+    def test_ad_domain_strips_nmap_trailing_artefact(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_adsvc(3268, "ldap", product="AD LDAP",
+                             extrainfo="Domain: lab.local0., Site: x")]
+        self.assertEqual(R.ad_domain(h), "lab.local")
+
+    def test_ad_domain_absent(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(80, "http", product="Apache")]
+        self.assertEqual(R.ad_domain(h), "")
+
+    def test_is_dc_true_for_krb_plus_ldap(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(88, "kerberos-sec"), _svc(389, "ldap"), _svc(445, "microsoft-ds")]
+        self.assertTrue(R.is_domain_controller(h))
+
+    def test_is_dc_false_without_kerberos(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(389, "ldap"), _svc(445, "microsoft-ds")]
+        self.assertFalse(R.is_domain_controller(h))
+
+
+class TestADDispatch(unittest.TestCase):
+    """Service routing: Kerberos handled, LDAP deduped, Windows-infra ports kept
+    out of the HTTP path."""
+    def _cfg(self):
+        return RunConfig(target="10.10.10.10", profile=Profile.lab())
+
+    def test_port_88_routes_to_kerberos(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(88, "kerberos-sec")]
+        calls = []
+        with mock.patch.object(EN, "_enum_kerberos",
+                               side_effect=lambda c, svc, out, dom: calls.append(svc.port)):
+            EN._enumerate_host_fresh(self._cfg(), h)
+        self.assertEqual(calls, [88])
+
+    def test_ldap_enumerated_once_across_ports(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(389, "ldap"), _svc(636, "ldaps"),
+                      _svc(3268, "ldap"), _svc(3269, "tcpwrapped")]
+        calls = []
+        with mock.patch.object(EN, "_enum_ldap",
+                               side_effect=lambda c, svc, out, dom="": calls.append(svc.port)):
+            EN._enumerate_host_fresh(self._cfg(), h)
+        self.assertEqual(calls, [389], f"LDAP enumerated on {calls}, expected [389]")
+
+    def test_winrm_and_httpapi_not_treated_as_web(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(5985, "http", product="Microsoft HTTPAPI httpd 2.0"),
+                      _svc(47001, "http", product="Microsoft HTTPAPI httpd 2.0")]
+        with mock.patch.object(EN, "_enum_http",
+                               side_effect=AssertionError("_enum_http must not run on WinRM/HTTPAPI")):
+            res = EN._enumerate_host_fresh(self._cfg(), h)
+        # both produce a lightweight recon note instead
+        self.assertTrue(any(f.service_port == 5985 for f in res.findings))
+        self.assertTrue(any(f.service_port == 47001 for f in res.findings))
+
+    def test_canonical_ldap_port_prefers_389(self):
+        self.assertEqual(EN._canonical_ldap_port([636, 3268, 389]), 389)
+        self.assertEqual(EN._canonical_ldap_port([3269, 3268]), 3268)
+        self.assertEqual(EN._canonical_ldap_port([636]), 636)
+
+
+class TestEnumLdapDeep(unittest.TestCase):
+    def test_naming_context_parsing(self):
+        ctx = ["namingContexts: CN=Schema,CN=Configuration,DC=lab,DC=local",
+               "defaultNamingContext: DC=lab,DC=local"]
+        self.assertEqual(EN._ldap_naming_context(ctx), "DC=lab,DC=local")
+
+    def test_domain_from_naming_context(self):
+        self.assertEqual(EN._domain_from_naming_context("DC=lab,DC=local"), "lab.local")
+        self.assertEqual(EN._domain_from_naming_context("CN=x"), "")
+
+    def test_anon_bind_tags_domain_and_users(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                        discovered_tools={"ldapsearch": "/usr/bin/ldapsearch"})
+        root = ("namingContexts: DC=lab,DC=local\n"
+                "defaultNamingContext: DC=lab,DC=local\n")
+        subtree = ("sAMAccountName: administrator\n"
+                   "sAMAccountName: jdoe\n"
+                   "description: account pwd is Summer2026!\n")
+
+        def fake_run(cmd, *a, **k):
+            return (0, subtree if "-s" in cmd and "sub" in cmd else root, "")
+
+        out = []
+        with mock.patch.object(EN, "run", side_effect=fake_run):
+            EN._enum_ldap(cfg, _svc(389, "ldap"), out)
+        tags = {k: v for f in out for k, v in (f.tags or {}).items()}
+        self.assertTrue(tags.get("anon_ldap"))
+        self.assertEqual(tags.get("ad_domain"), "lab.local")
+        self.assertEqual(tags.get("ldap_users"), 2)
+        self.assertTrue(tags.get("ldap_secret"))
+
+
+class TestKerberosEnum(unittest.TestCase):
+    def test_no_domain_emits_recon_hint(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(), out_dir=tempfile.mkdtemp())
+        out = []
+        EN._enum_kerberos(cfg, _svc(88, "kerberos-sec"), out, "")
+        self.assertTrue(any("realm not auto-detected" in f.summary for f in out))
+
+    def test_asrep_roast_flagged(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.gentle(),
+                        out_dir=tempfile.mkdtemp(),
+                        discovered_tools={"impacket-GetNPUsers": "/usr/bin/impacket-GetNPUsers"})
+        hashline = "$krb5asrep$23$jdoe@LAB.LOCAL:abc123$def456"
+
+        def fake_run(cmd, *a, **k):
+            return (0, hashline + "\n", "")
+
+        out = []
+        with mock.patch.object(EN, "run", side_effect=fake_run):
+            EN._enum_kerberos(cfg, _svc(88, "kerberos-sec"), out, "lab.local")
+        self.assertTrue(any(f.tags.get("asrep_roast") for f in out),
+                        [f.summary for f in out])
+
+    def test_asrep_hint_when_tool_absent(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                        out_dir=tempfile.mkdtemp(), discovered_tools={})
+        out = []
+        with mock.patch.object(EN, "run", return_value=(0, "", "")):
+            EN._enum_kerberos(cfg, _svc(88, "kerberos-sec"), out, "lab.local")
+        self.assertTrue(any("AS-REP roast not run" in f.summary for f in out))
+
+
+class TestADExploitNoise(unittest.TestCase):
+    """The misleading leads from the report: ancient DCOM RPC dump and a DNS DoS."""
+    def _cfg(self, **kw):
+        base = dict(target="10.10.10.10", profile=Profile.lab(),
+                    discovered_tools={"searchsploit": "/usr/bin/searchsploit"})
+        base.update(kw)
+        return RunConfig(**base)
+
+    def test_generic_windows_rpc_banner_skipped(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(135, "msrpc", product="Microsoft Windows RPC")]
+        with mock.patch.object(E, "run") as run_mock:
+            cands = E._searchsploit_candidates(self._cfg(), h)
+        run_mock.assert_not_called()
+        self.assertEqual(cands, [])
+
+    def test_dos_only_hit_dropped_when_not_aggressive(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(53, "domain", product="Simple DNS Plus")]
+        sp = ('{"RESULTS_EXPLOIT":[{"Title":"Simple DNS Plus - Remote Denial of '
+              'Service","URL":"https://x/6059"}]}')
+        with mock.patch.object(E, "run", return_value=(0, sp, "")):
+            cands = E._searchsploit_candidates(self._cfg(aggressive=False), h)
+        self.assertEqual(cands, [])
+
+    def test_dos_kept_when_aggressive(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(53, "domain", product="Simple DNS Plus")]
+        sp = ('{"RESULTS_EXPLOIT":[{"Title":"Simple DNS Plus - Remote Denial of '
+              'Service","URL":"https://x/6059"}]}')
+        with mock.patch.object(E, "run", return_value=(0, sp, "")):
+            cands = E._searchsploit_candidates(self._cfg(aggressive=True), h)
+        self.assertTrue(cands)
+
+
+class TestADCveLeads(unittest.TestCase):
+    def _cfg(self):
+        return RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                         discovered_tools={"nxc": "/usr/bin/nxc"})
+
+    def test_dc_gets_zerologon_and_nopac(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(88, "kerberos-sec"), _svc(389, "ldap"), _svc(445, "microsoft-ds")]
+        titles = " ".join(c.title for c in E._ad_cve_candidates(self._cfg(), h))
+        self.assertIn("Zerologon", titles)
+        self.assertIn("noPac", titles)
+        self.assertIn("PetitPotam", titles)
+
+    def test_non_dc_gets_no_ad_leads(self):
+        h = R.HostResult(ip="10.0.0.1")
+        h.services = [_svc(80, "http")]
+        self.assertEqual(E._ad_cve_candidates(self._cfg(), h), [])
+
+
+class TestADReport(unittest.TestCase):
+    def _dc_host(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_adsvc(88, "kerberos-sec"),
+                      _adsvc(389, "ldap", product="Microsoft Windows Active Directory LDAP",
+                             extrainfo="Domain: lab.local, Site: x"),
+                      _adsvc(445, "microsoft-ds")]
+        return h
+
+    def test_dc_synthesis_line(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab())
+        md = RP._render_md(cfg, self._dc_host(), EN.EnumResult(), E.ExploitResult())
+        self.assertIn("Domain Controller", md)
+        self.assertIn("lab.local", md)
+
+    def test_asrep_and_secret_leads(self):
+        enum = EN.EnumResult()
+        enum.findings.append(EN.EnumFinding(88, "GetNPUsers", "AS-REP roastable",
+                                            tags={"asrep_roast": True}))
+        enum.findings.append(EN.EnumFinding(389, "ldapsearch", "secret in desc",
+                                            tags={"ldap_secret": True}))
+        enum.findings.append(EN.EnumFinding(88, "kerbrute", "users",
+                                            tags={"ad_users": 12}))
+        leads = RP._priority_leads(self._dc_host(), enum, E.ExploitResult())
+        self.assertTrue(any("AS-REP roast" in l for l in leads))
+        self.assertTrue(any("Cleartext secret" in l for l in leads))
+        self.assertTrue(any("AD users" in l for l in leads))
+
+
+class TestADToolDetection(unittest.TestCase):
+    def test_ad_tools_probed(self):
+        from vantage.config import detect_tools
+        keys = set(detect_tools().keys())
+        for tool in ("kerbrute", "nxc", "netexec", "enum4linux-ng",
+                     "impacket-GetNPUsers", "bloodhound-python", "certipy"):
+            self.assertIn(tool, keys, tool)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

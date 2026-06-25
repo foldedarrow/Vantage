@@ -293,6 +293,10 @@ def detect_tools() -> dict:
         "ldapsearch",
         "wpscan", "droopescan", "mount", "showmount",
         "feroxbuster", "arjun",
+        # Active Directory enumeration (DC recon: Kerberos, null-session SMB, BloodHound)
+        "kerbrute", "nxc", "netexec", "enum4linux-ng", "rpcclient",
+        "impacket-GetNPUsers", "impacket-GetUserSPNs", "impacket-lookupsid",
+        "bloodhound-python", "certipy", "ldapdomaindump",
         # exploit-identification helpers (presence drives which leads we surface)
         "sqlmap", "git-dumper", "hydra", "mysql",
         # cloud recon (unauthenticated misconfig discovery)

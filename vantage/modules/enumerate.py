@@ -12,9 +12,27 @@ from dataclasses import dataclass, field
 from dataclasses import asdict
 
 from ..config import RunConfig
-from ..modules.recon import HostResult, Service
+from ..modules.recon import HostResult, Service, ad_domain
 from ..util import good, info, run, warn, warn_once, parallel_map, load_state, save_state
 from .. import wordlists
+
+
+# WinRM/WS-Management, RPC-over-HTTP and the bare Windows HTTPAPI listener all
+# answer on "http" ports that nmap labels 'http', but they are NOT web apps —
+# running whatweb/nikto/dir-brute/sqlmap against them produces pure noise
+# ("missing security headers" on a DC) and, worse, tees up sqlmap at WinRM. Keep
+# them out of the HTTP path; they get their own lightweight recon notes instead.
+_NON_WEB_HTTP_PORTS = {5985, 5986, 47001, 593, 9389}
+
+# A tiny curated set of AD accounts to try when no username wordlist is resolved.
+# Enough to catch the classic AS-REP-roastable service accounts on a lab DC
+# without the volume of a full SecLists run.
+_COMMON_AD_USERS = [
+    "administrator", "admin", "guest", "krbtgt", "ldap", "svc-ldap", "svc_ldap",
+    "svc-admin", "svc_admin", "service", "sql", "sqlservice", "svc-sql",
+    "backup", "web", "webadmin", "helpdesk", "support", "test", "dev",
+    "j.doe", "jdoe", "john", "jane", "mike", "sarah", "david", "robert",
+]
 
 
 @dataclass
@@ -132,10 +150,23 @@ def enumerate_host(cfg: RunConfig, host: HostResult) -> EnumResult:
 def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
     res = EnumResult()
 
+    # Detect the AD realm once, up front, from nmap's LDAP/Kerberos banners. The
+    # per-service handlers run concurrently, so the Kerberos handler can't wait on
+    # the LDAP one — both read this shared, pre-computed value instead.
+    domain = ad_domain(host)
+
     def handle(svc: Service) -> list[EnumFinding]:
         local: list[EnumFinding] = []
         name = svc.name.lower()
-        if name in ("http", "https", "http-alt", "http-proxy") or svc.port in (80, 443, 8080, 8000, 8443):
+        # Windows infra ports (WinRM/WSMan, RPC-over-HTTP, HTTPAPI, ADWS) answer on
+        # 'http' but are not web apps — route them away from the HTTP enumeration.
+        is_web = ((name in ("http", "https", "http-alt", "http-proxy")
+                   or svc.port in (80, 443, 8080, 8000, 8443))
+                  and svc.port not in _NON_WEB_HTTP_PORTS
+                  and name not in ("wsman", "mc-nmf", "ncacn_http"))
+        if name == "kerberos-sec" or svc.port == 88:
+            _enum_kerberos(cfg, svc, local, domain)
+        elif is_web:
             _enum_http(cfg, svc, local)
             if scheme_is_tls(svc):
                 _enum_tls(cfg, svc, local)
@@ -163,8 +194,15 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
             _enum_snmp(cfg, svc, local)
         elif name == "ssh" or svc.port == 22:
             local.append(EnumFinding(svc.port, "recon", f"SSH: {svc.banner or 'version unknown'}"))
-        elif name in ("ldap", "ldaps") or svc.port in (389, 636):
-            _enum_ldap(cfg, svc, local)
+        elif name in ("ldap", "ldaps") or svc.port in (389, 636, 3268, 3269):
+            # 389 (LDAP), 636 (LDAPS), 3268/3269 (Global Catalog) are the same
+            # directory — enumerate ONCE on the canonical port (prefer plain 389)
+            # so the report doesn't carry duplicate anonymous-bind leads.
+            ldap_ports = [x.port for x in host.all_services
+                          if x.name.lower() in ("ldap", "ldaps")
+                          or x.port in (389, 636, 3268, 3269)]
+            if svc.port == _canonical_ldap_port(ldap_ports):
+                _enum_ldap(cfg, svc, local, domain)
         elif svc.port == 2375 or (svc.port == 2376 and "docker" in name):
             _enum_docker_api(cfg, svc, local)
         elif name in ("elasticsearch",) or svc.port == 9200 or "elasticsearch" in svc.banner.lower():
@@ -174,7 +212,15 @@ def _enumerate_host_fresh(cfg: RunConfig, host: HostResult) -> EnumResult:
                                      "— check NLA / CredSSP (CVE-2019-0708 BlueKeep on legacy)"))
         elif name in ("wsman",) or svc.port in (5985, 5986):
             local.append(EnumFinding(svc.port, "recon", f"WinRM exposed: {svc.banner or 'service up'} "
-                                     "— try evil-winrm with valid creds"))
+                                     "— try evil-winrm / nxc winrm once you have valid creds"))
+        elif svc.port == 47001:
+            local.append(EnumFinding(svc.port, "recon",
+                                     "Windows HTTPAPI / WS-Management companion listener "
+                                     "(not a web app) — WinRM lives on :5985"))
+        elif name == "mc-nmf" or svc.port == 9389:
+            local.append(EnumFinding(svc.port, "recon",
+                                     "AD Web Services (ADWS) — drives the PowerShell AD "
+                                     "module / SOAPHound; queryable with valid creds"))
         elif name in ("mysql", "ms-sql-s", "postgresql", "mongodb", "redis") or \
                 svc.port in (3306, 1433, 5432, 27017, 6379):
             _enum_dbcache(cfg, svc, local)
@@ -560,12 +606,19 @@ def _enum_ftp(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
 
 # --- SMB ---------------------------------------------------------------------
 def _enum_smb(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
-    if _have(cfg, "enum4linux"):
-        rc, e4, _ = run(["enum4linux", "-a", cfg.target], timeout=240)
+    # Modern null-session AD enumeration via netexec/nxc: users, password policy,
+    # and (lab/aggressive only) RID cycling. enum4linux-ng is preferred over the
+    # legacy enum4linux, which is largely defanged on hardened 2022 DCs.
+    _enum_smb_nxc(cfg, svc, out)
+    e4tool = _have_any(cfg, "enum4linux-ng", "enum4linux")
+    if e4tool:
+        rc, e4, _ = run([e4tool, "-a", cfg.target], timeout=240)
         if e4.strip():
             interesting = [l for l in e4.splitlines()
-                           if any(k in l for k in ("Sharename", "Mapping:", "Server", "OS=", "user:"))]
-            out.append(EnumFinding(svc.port, "enum4linux", "SMB enumeration captured",
+                           if any(k in l for k in ("Sharename", "Mapping:", "Server",
+                                                   "OS=", "user:", "Password Policy",
+                                                   "Domain Sid"))]
+            out.append(EnumFinding(svc.port, e4tool, "SMB enumeration captured",
                                    "\n".join(interesting) or e4[:2000]))
     shares: list[str] = []
     if _have(cfg, "smbclient"):
@@ -582,6 +635,46 @@ def _enum_smb(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         if rc == 0 and ls.strip():
             out.append(EnumFinding(svc.port, "smbclient", f"share '{share}' readable (null session)",
                                    ls.strip()[:1500], tags={"smb_share": share}))
+
+
+def _enum_smb_nxc(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
+    """Null/guest-session SMB enumeration with netexec (nxc) — the modern path for
+    pulling the domain user list, password policy and SID off a DC. RID cycling is
+    higher-volume, so it's gated to lab/aggressive. Read-only; no auth attempted."""
+    tool = _have_any(cfg, "nxc", "netexec")
+    if not tool:
+        return
+    base = [tool, "smb", cfg.target, "-u", "", "-p", ""]
+    # password policy + user list (low volume, run everywhere)
+    rc, pol, _ = run(base + ["--pass-pol"], timeout=90)
+    if "Minimum password length" in pol or "Password Complexity" in pol:
+        lines = [l for l in pol.splitlines()
+                 if any(k in l for k in ("password", "Lockout", "Complexity",
+                                         "Minimum", "Maximum"))]
+        out.append(EnumFinding(svc.port, tool, "domain password policy (null session)",
+                               "\n".join(lines)[:1500] or pol[:1500],
+                               tags={"pass_pol": True}))
+    rc, usr, _ = run(base + ["--users"], timeout=120)
+    users = sorted({m.group(1) for m in
+                    re.finditer(r"^\S+\s+\S+\s+\d+\s+(?:smb\s+)?([^\s]+)\\([^\s]+)", usr, re.M)})
+    # nxc prints '<ip> <port> <host> <DOMAIN\user> ...'; a simpler grab on the
+    # '-Username-' column also works across versions.
+    if not users:
+        users = sorted({m.group(1) for m in re.finditer(r"\\([A-Za-z0-9._-]+)\s", usr)})
+    if users:
+        out.append(EnumFinding(svc.port, tool,
+                               f"{len(users)} domain user(s) via null session",
+                               "\n".join(users)[:1500],
+                               tags={"ad_users": len(users)}))
+    if _ad_active_ok(cfg):
+        rc, rid, _ = run(base + ["--rid-brute"], timeout=180)
+        rid_users = sorted({m.group(1) for m in
+                            re.finditer(r"\\([A-Za-z0-9._-]+)\s+\(SidTypeUser\)", rid)})
+        if rid_users and len(rid_users) > len(users):
+            out.append(EnumFinding(svc.port, tool,
+                                   f"{len(rid_users)} user(s) via RID cycling (null session)",
+                                   "\n".join(rid_users)[:1500],
+                                   tags={"ad_users": len(rid_users)}))
 
 
 # --- NFS ----------------------------------------------------------------------
@@ -701,22 +794,200 @@ def _enum_elasticsearch(cfg: RunConfig, svc: Service, out: list[EnumFinding]) ->
                                (root + "\n\n" + idx)[:1800], tags={"unauth_es": True}))
 
 
+# --- Active Directory: shared helpers ----------------------------------------
+def _canonical_ldap_port(ports: list[int]) -> int:
+    """The single LDAP port to enumerate when several are open. Prefer plain 389,
+    then the Global Catalog 3268, then the TLS variants — all expose the same
+    directory, so we only hit one."""
+    for p in (389, 3268, 636, 3269):
+        if p in ports:
+            return p
+    return min(ports) if ports else 389
+
+
+def _ad_active_ok(cfg: RunConfig) -> bool:
+    """Higher-volume AD enumeration (RID cycling, kerbrute over a full wordlist) is
+    fine on lab/aggressive but too noisy for the gentle/HTB or stealth profile —
+    those get only the low-volume probes (root DSE, AS-REP on a small seed list)."""
+    if getattr(cfg, "stealth", False):
+        return False
+    return cfg.aggressive or cfg.profile.name.startswith("lab")
+
+
+def _ad_userlist(cfg: RunConfig) -> str:
+    """Path to a username list for Kerberos enumeration. On lab/aggressive, prefer
+    a resolved SecLists username wordlist (broad coverage); otherwise fall back to
+    the small built-in seed written into the output dir (quiet, targeted)."""
+    if _ad_active_ok(cfg):
+        wl = wordlists.username_wordlist(cfg, cfg.wordlist_users)
+        if wl:
+            return wl
+    seed = os.path.join(cfg.out_dir, "ad_users_seed.txt")
+    try:
+        with open(seed, "w") as f:
+            f.write("\n".join(_COMMON_AD_USERS) + "\n")
+        return seed
+    except OSError:
+        return ""
+
+
 # --- LDAP --------------------------------------------------------------------
-def _enum_ldap(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
-    """Anonymous LDAP bind: read the root DSE for naming contexts (domain layout).
-    Anonymous read of namingContexts is a common AD/LDAP misconfiguration."""
+def _ldap_naming_context(contexts: list[str]) -> str:
+    """Pull the domain naming context (DC=lab,DC=local) from root-DSE lines,
+    preferring defaultNamingContext over the schema/config contexts."""
+    default = ""
+    first = ""
+    for line in contexts:
+        low = line.lower()
+        val = line.split(":", 1)[1].strip() if ":" in line else ""
+        if not val:
+            continue
+        if low.startswith("defaultnamingcontext:"):
+            default = val
+        elif low.startswith("namingcontexts:") and "dc=" in low and "cn=" not in low:
+            first = first or val
+    return default or first
+
+
+def _domain_from_naming_context(nc: str) -> str:
+    """'DC=lab,DC=local' -> 'lab.local'. Returns '' if no DC= components."""
+    parts = [p.split("=", 1)[1] for p in nc.split(",")
+             if p.strip().lower().startswith("dc=") and "=" in p]
+    return ".".join(parts).lower() if parts else ""
+
+
+def _enum_ldap(cfg: RunConfig, svc: Service, out: list[EnumFinding],
+               domain: str = "") -> None:
+    """Anonymous LDAP bind: read the root DSE for naming contexts (domain layout),
+    then — if the bind is anonymous-readable — attempt a subtree dump for users
+    and password-bearing description fields. Anonymous read is a common AD/LDAP
+    misconfiguration; the description field frequently holds plaintext passwords."""
     if not _have(cfg, "ldapsearch", quiet=True):
         return
-    scheme = "ldaps" if svc.port == 636 else "ldap"
-    rc, ls, _ = run(["ldapsearch", "-x", "-H", f"{scheme}://{cfg.target}:{svc.port}",
+    scheme = "ldaps" if svc.port in (636, 3269) else "ldap"
+    url = f"{scheme}://{cfg.target}:{svc.port}"
+    rc, ls, _ = run(["ldapsearch", "-x", "-H", url,
                      "-s", "base", "-b", "", "namingContexts", "defaultNamingContext"],
                     timeout=45)
     contexts = [l for l in ls.splitlines() if l.lower().startswith("namingcontexts:")
                 or l.lower().startswith("defaultnamingcontext:")]
-    if contexts:
+    if not contexts:
+        return
+    nc = _ldap_naming_context(contexts)
+    dom = _domain_from_naming_context(nc) or domain
+    tags = {"anon_ldap": True}
+    if dom:
+        tags["ad_domain"] = dom
+    out.append(EnumFinding(svc.port, "ldapsearch",
+                           "anonymous LDAP bind — root DSE readable"
+                           + (f" (domain {dom})" if dom else ""),
+                           "\n".join(contexts)[:1500], tags=tags))
+    if not nc:
+        return
+    # Anonymous subtree read is usually denied on hardened AD (only the root DSE
+    # is anon-readable) — but when it IS allowed it leaks the whole user list and
+    # any passwords stashed in description fields. Best-effort; quiet on failure.
+    rc, dump, _ = run(["ldapsearch", "-x", "-H", url, "-b", nc, "-s", "sub",
+                       "(&(objectClass=user)(objectCategory=person))",
+                       "sAMAccountName", "userPrincipalName", "description"],
+                      timeout=90)
+    users = [l.split(":", 1)[1].strip() for l in dump.splitlines()
+             if l.lower().startswith("samaccountname:")]
+    descs = [l for l in dump.splitlines() if l.lower().startswith("description:")]
+    if users:
         out.append(EnumFinding(svc.port, "ldapsearch",
-                               "anonymous LDAP bind — root DSE readable",
-                               "\n".join(contexts)[:1500], tags={"anon_ldap": True}))
+                               f"anonymous LDAP allows user enumeration — {len(users)} account(s)",
+                               "\n".join(users)[:1500],
+                               tags={"ldap_users": len(users), "ad_domain": dom}))
+    secret_descs = [d for d in descs
+                    if re.search(r"pass|pwd|secret|cred", d, re.I)]
+    if secret_descs:
+        out.append(EnumFinding(svc.port, "ldapsearch",
+                               "password-like value in LDAP description field(s) "
+                               "(readable anonymously)",
+                               "\n".join(secret_descs)[:1500],
+                               tags={"ldap_secret": True}))
+
+
+# --- Kerberos ----------------------------------------------------------------
+def _have_any(cfg: RunConfig, *tools: str) -> str:
+    """Return the first of `tools` that is installed, or '' if none are."""
+    for t in tools:
+        if cfg.discovered_tools.get(t):
+            return t
+    return ""
+
+
+def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
+                   domain: str) -> None:
+    """Credential-less Kerberos enumeration on a DC (port 88):
+      - kerbrute / krb5-enum-users: validate usernames (no creds needed).
+      - GetNPUsers (AS-REP roasting): accounts with pre-auth disabled yield a
+        crackable hash with NO credentials — the classic DC first-blood.
+    All read-only enumeration; vantage never cracks or uses the hashes."""
+    if not domain:
+        out.append(EnumFinding(svc.port, "recon",
+                               "Kerberos (88) — Active Directory DC; realm not "
+                               "auto-detected. Re-run with --hostname <fqdn> or read "
+                               "it from the LDAP root DSE to enable user/AS-REP enum."))
+        return
+    out.append(EnumFinding(svc.port, "recon",
+                           f"Kerberos (88) — Active Directory DC for realm {domain}",
+                           tags={"ad_domain": domain, "ad_dc": True}))
+    userlist = _ad_userlist(cfg)
+
+    # 1. Username validation. kerbrute is fastest/quietest; fall back to the always
+    #    -present nmap krb5-enum-users script.
+    valid_users: list[str] = []
+    if userlist and _have(cfg, "kerbrute", quiet=True) and _ad_active_ok(cfg):
+        rc, kb, _ = run(["kerbrute", "userenum", "--dc", cfg.target, "-d", domain,
+                         userlist, "-o", "/dev/stdout"], timeout=180)
+        valid_users = sorted({m.group(1) for m in
+                              re.finditer(r"VALID USERNAME:\s+([^@\s]+)@", kb)})
+        if valid_users:
+            out.append(EnumFinding(svc.port, "kerbrute",
+                                   f"{len(valid_users)} valid AD username(s) via Kerberos",
+                                   "\n".join(valid_users)[:1500],
+                                   tags={"ad_users": len(valid_users), "ad_domain": domain}))
+    elif userlist and _have(cfg, "nmap", quiet=True):
+        rc, nse, _ = run(["nmap", "-p", "88", "--script", "krb5-enum-users",
+                          "--script-args",
+                          f"krb5-enum-users.realm={domain},userdb={userlist}",
+                          cfg.target], timeout=180)
+        valid_users = sorted({m.group(1) for m in
+                              re.finditer(r"^\|\s+([^@\s]+)@", nse, re.M)})
+        if valid_users:
+            out.append(EnumFinding(svc.port, "krb5-enum-users",
+                                   f"{len(valid_users)} valid AD username(s) via Kerberos",
+                                   "\n".join(valid_users)[:1500],
+                                   tags={"ad_users": len(valid_users), "ad_domain": domain}))
+
+    # 2. AS-REP roasting (no creds). Prefer impacket's GetNPUsers; feed it the
+    #    validated users if we found any, else the seed/wordlist.
+    getnp = _have_any(cfg, "impacket-GetNPUsers", "GetNPUsers.py", "GetNPUsers")
+    if getnp and userlist:
+        roast_file = userlist
+        if valid_users:
+            roast_file = os.path.join(cfg.out_dir, "ad_valid_users.txt")
+            try:
+                with open(roast_file, "w") as f:
+                    f.write("\n".join(valid_users) + "\n")
+            except OSError:
+                roast_file = userlist
+        rc, npo, _ = run([getnp, f"{domain}/", "-dc-ip", cfg.target, "-no-pass",
+                          "-usersfile", roast_file, "-format", "hashcat"], timeout=180)
+        hashes = [l.strip() for l in npo.splitlines() if l.startswith("$krb5asrep$")]
+        if hashes:
+            out.append(EnumFinding(svc.port, "GetNPUsers",
+                                   f"AS-REP roastable account(s): {len(hashes)} — "
+                                   "crackable offline with NO credentials",
+                                   "\n".join(hashes)[:2000],
+                                   tags={"asrep_roast": True, "ad_domain": domain}))
+    elif not getnp:
+        out.append(EnumFinding(svc.port, "recon",
+                               "AS-REP roast not run (impacket GetNPUsers absent). "
+                               f"Try: GetNPUsers {domain}/ -dc-ip {cfg.target} -no-pass "
+                               "-usersfile users.txt -format hashcat"))
 
 
 # --- Docker API --------------------------------------------------------------

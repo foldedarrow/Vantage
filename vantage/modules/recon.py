@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, asdict
 
@@ -39,6 +40,38 @@ class HostResult:
     @property
     def all_services(self) -> list[Service]:
         return self.services + self.udp_services
+
+
+# --- Active Directory fingerprinting -----------------------------------------
+# nmap labels the LDAP/Global-Catalog ports on a DC with the realm inline, e.g.
+# 'Microsoft Windows Active Directory LDAP Domain: lab.local, Site: ...'. The
+# realm is the single most useful fact on a DC — almost every credential-less AD
+# step (kerbrute, AS-REP roasting, ldapdomaindump) keys off it.
+_AD_DOMAIN_RE = re.compile(r"Domain:\s*([A-Za-z0-9.\-]+)", re.I)
+
+
+def ad_domain(host: HostResult) -> str:
+    """Best-effort AD/Kerberos realm (e.g. 'lab.local') parsed from nmap's
+    LDAP/Kerberos service banners. Returns '' if not detected."""
+    for s in host.all_services:
+        m = _AD_DOMAIN_RE.search(s.banner or "")
+        if not m:
+            continue
+        dom = m.group(1).split(",")[0].strip().rstrip(".")
+        # nmap occasionally appends a stray trailing byte rendered as a digit
+        # ('lab.local0'); a real FQDN's TLD never ends in a digit, so trim it.
+        if dom and dom[-1].isdigit() and "." in dom:
+            dom = dom.rstrip("0123456789")
+        if "." in dom:
+            return dom.lower()
+    return ""
+
+
+def is_domain_controller(host: HostResult) -> bool:
+    """Canonical DC fingerprint: Kerberos (88) plus an LDAP/GC port (389/3268/
+    636/3269) — the combination nmap sees on an Active Directory controller."""
+    ports = {s.port for s in host.all_services}
+    return 88 in ports and bool(ports & {389, 3268, 636, 3269})
 
 
 # High-value services that sit OUTSIDE nmap's default top-1000, so a quiet
