@@ -62,6 +62,12 @@ sudo python3 run.py 192.168.56.0/24  # CIDR sweep: per-host reports + an index
 tools on `PATH`. **nmap is the only hard requirement** — any other missing tool is
 detected at startup and its steps are skipped.
 
+**On Ubuntu?** vantage's Python is distro-agnostic, but ~half the toolchain isn't in
+Ubuntu's repos. Use `sudo ./setup-ubuntu.sh` instead of `setup.sh` — it installs the
+tools across apt/Go/pipx/gem/git and forces every binary into `/usr/local/bin` (so
+`sudo python3 run.py` finds them). `sudo SKIP_SECLISTS=1 ./setup-ubuntu.sh` skips the
+large SecLists clone. Then `sudo python3 run.py --check` to confirm the matrix.
+
 The report opens with a **Priority leads** section — a ranked "try these first"
 worklist (known RCE → unauthenticated/anonymous access → known CVEs → default
 creds) distilled from every phase.
