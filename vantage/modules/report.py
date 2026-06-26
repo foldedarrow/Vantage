@@ -169,6 +169,17 @@ def _priority_leads(host, enum, exploits) -> list[str]:
         if c.high_confidence and c.msf_module:
             tiers.append((1, f"**RCE** · :{c.port} — {c.title}  (`{c.msf_module}`)"))
 
+    # 1c. Domain-Controller attack paths. On a DC these are the marquee leads —
+    #     surface them in the worklist, not buried in the candidates list. The
+    #     unauthenticated ones (Zerologon, coercion) rank with RCE; the ones that
+    #     need a credential first sit lower (tier 4) so they don't crowd the top.
+    for c in getattr(exploits, "candidates", []):
+        if getattr(c, "category", "") == "ad":
+            needs = getattr(c, "needs_cred", False)
+            qual = "needs a valid credential" if needs else "unauthenticated"
+            tiers.append((4 if needs else 1,
+                          f"**DC attack** · :{c.port} — {c.title} ({qual}); verify"))
+
     # 1b. Confirmed default credentials (e.g. nikto proving Tomcat Manager
     #     tomcat:tomcat — that's WAR-deploy RCE, not a guess). Ranks with RCE.
     for f in getattr(enum, "findings", []):

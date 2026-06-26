@@ -645,6 +645,7 @@ def _enum_smb_nxc(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     if not tool:
         return
     base = [tool, "smb", cfg.target, "-u", "", "-p", ""]
+    denied = False
     # password policy + user list (low volume, run everywhere)
     rc, pol, _ = run(base + ["--pass-pol"], timeout=90)
     if "Minimum password length" in pol or "Password Complexity" in pol:
@@ -654,13 +655,12 @@ def _enum_smb_nxc(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         out.append(EnumFinding(svc.port, tool, "domain password policy (null session)",
                                "\n".join(lines)[:1500] or pol[:1500],
                                tags={"pass_pol": True}))
+    elif "STATUS_ACCESS_DENIED" in pol:
+        denied = True
     rc, usr, _ = run(base + ["--users"], timeout=120)
-    users = sorted({m.group(1) for m in
-                    re.finditer(r"^\S+\s+\S+\s+\d+\s+(?:smb\s+)?([^\s]+)\\([^\s]+)", usr, re.M)})
-    # nxc prints '<ip> <port> <host> <DOMAIN\user> ...'; a simpler grab on the
-    # '-Username-' column also works across versions.
-    if not users:
-        users = sorted({m.group(1) for m in re.finditer(r"\\([A-Za-z0-9._-]+)\s", usr)})
+    users = _parse_nxc_users(usr)
+    if "STATUS_ACCESS_DENIED" in usr:
+        denied = True
     if users:
         out.append(EnumFinding(svc.port, tool,
                                f"{len(users)} domain user(s) via null session",
@@ -670,11 +670,41 @@ def _enum_smb_nxc(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
         rc, rid, _ = run(base + ["--rid-brute"], timeout=180)
         rid_users = sorted({m.group(1) for m in
                             re.finditer(r"\\([A-Za-z0-9._-]+)\s+\(SidTypeUser\)", rid)})
+        if "STATUS_ACCESS_DENIED" in rid:
+            denied = True
         if rid_users and len(rid_users) > len(users):
             out.append(EnumFinding(svc.port, tool,
                                    f"{len(rid_users)} user(s) via RID cycling (null session)",
                                    "\n".join(rid_users)[:1500],
                                    tags={"ad_users": len(rid_users)}))
+    # Make a locked-down result visible: anonymous enum being refused is itself a
+    # finding (it tells you a valid credential is the next requirement), not a
+    # silent no-op.
+    if denied and not users:
+        out.append(EnumFinding(svc.port, tool,
+                               "SMB null session: access denied — anonymous user/policy "
+                               "enumeration is restricted; needs a valid credential"))
+
+
+# nxc/netexec '--users' prints a header row ('-Username-') then data rows whose
+# layout shifts between versions: some emit 'DOMAIN\\user', others a bare
+# username column. Parse both, skipping the header and machine accounts ($).
+def _parse_nxc_users(text: str) -> list[str]:
+    users: set[str] = set()
+    for line in text.splitlines():
+        if "-Username-" in line or "[*]" in line or "[-]" in line:
+            continue
+        m = re.search(r"\\([A-Za-z0-9._-]+)(\$)?", line)       # DOMAIN\user form
+        if m:
+            if not m.group(2):     # skip machine accounts (DOMAIN\HOST$)
+                users.add(m.group(1))
+            continue
+        # bare-column form: '<proto> <ip> <port> <host> <username> ...'
+        cols = line.split()
+        if len(cols) >= 5 and cols[0].upper() == "SMB" and not cols[4].endswith("$"):
+            if re.fullmatch(r"[A-Za-z0-9._-]+", cols[4]):
+                users.add(cols[4])
+    return sorted(users)
 
 
 # --- NFS ----------------------------------------------------------------------
@@ -920,6 +950,18 @@ def _have_any(cfg: RunConfig, *tools: str) -> str:
     return ""
 
 
+def _file_line_count(path: str) -> int:
+    """Count non-blank lines in a wordlist (for 'N candidates' messaging). 0 on
+    any error / empty path."""
+    if not path:
+        return 0
+    try:
+        with open(path, errors="ignore") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
 def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
                    domain: str) -> None:
     """Credential-less Kerberos enumeration on a DC (port 88):
@@ -937,6 +979,8 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
                            f"Kerberos (88) — Active Directory DC for realm {domain}",
                            tags={"ad_domain": domain, "ad_dc": True}))
     userlist = _ad_userlist(cfg)
+    n_candidates = _file_line_count(userlist)
+    src = "full wordlist" if cfg.aggressive else "built-in seed"
     # --aggressive uses the full username wordlist (thousands of AS-REQs), so give
     # the Kerberos tools a much larger budget; the default seed run stays snappy.
     kt = 600 if cfg.aggressive else 180
@@ -944,28 +988,33 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
     # 1. Username validation. kerbrute is fastest/quietest; fall back to the always
     #    -present nmap krb5-enum-users script.
     valid_users: list[str] = []
+    user_tool = ""
     if userlist and _have(cfg, "kerbrute", quiet=True) and _ad_active_ok(cfg):
+        user_tool = "kerbrute"
         rc, kb, _ = run(["kerbrute", "userenum", "--dc", cfg.target, "-d", domain,
                          userlist, "-o", "/dev/stdout"], timeout=kt)
         valid_users = sorted({m.group(1) for m in
                               re.finditer(r"VALID USERNAME:\s+([^@\s]+)@", kb)})
-        if valid_users:
-            out.append(EnumFinding(svc.port, "kerbrute",
-                                   f"{len(valid_users)} valid AD username(s) via Kerberos",
-                                   "\n".join(valid_users)[:1500],
-                                   tags={"ad_users": len(valid_users), "ad_domain": domain}))
     elif userlist and _have(cfg, "nmap", quiet=True):
+        user_tool = "krb5-enum-users"
         rc, nse, _ = run(["nmap", "-p", "88", "--script", "krb5-enum-users",
                           "--script-args",
                           f"krb5-enum-users.realm={domain},userdb={userlist}",
                           cfg.target], timeout=kt)
         valid_users = sorted({m.group(1) for m in
                               re.finditer(r"^\|\s+([^@\s]+)@", nse, re.M)})
-        if valid_users:
-            out.append(EnumFinding(svc.port, "krb5-enum-users",
-                                   f"{len(valid_users)} valid AD username(s) via Kerberos",
-                                   "\n".join(valid_users)[:1500],
-                                   tags={"ad_users": len(valid_users), "ad_domain": domain}))
+    if valid_users:
+        out.append(EnumFinding(svc.port, user_tool,
+                               f"{len(valid_users)} valid AD username(s) via Kerberos",
+                               "\n".join(valid_users)[:1500],
+                               tags={"ad_users": len(valid_users), "ad_domain": domain}))
+    elif user_tool:
+        # Surface that the check RAN and found nothing — otherwise a clean result
+        # is indistinguishable from "never attempted".
+        out.append(EnumFinding(svc.port, user_tool,
+                               f"Kerberos user enum: 0 of {n_candidates} candidate "
+                               f"name(s) valid ({src}) — pass --wordlist-users with a "
+                               "domain-specific list to widen coverage"))
 
     # 2. AS-REP roasting (no creds). Prefer impacket's GetNPUsers; feed it the
     #    validated users if we found any, else the seed/wordlist.
@@ -988,6 +1037,10 @@ def _enum_kerberos(cfg: RunConfig, svc: Service, out: list[EnumFinding],
                                    "crackable offline with NO credentials",
                                    "\n".join(hashes)[:2000],
                                    tags={"asrep_roast": True, "ad_domain": domain}))
+        else:
+            out.append(EnumFinding(svc.port, "GetNPUsers",
+                                   "AS-REP roast: 0 roastable account(s) among the "
+                                   "candidates tested (no pre-auth-disabled users found)"))
     elif not getnp:
         out.append(EnumFinding(svc.port, "recon",
                                "AS-REP roast not run (impacket GetNPUsers absent). "

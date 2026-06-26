@@ -1666,6 +1666,69 @@ class TestNoWebNoSqlmap(unittest.TestCase):
         self.assertEqual(sweep[0].port, 8080)
 
 
+class TestNxcUserParsing(unittest.TestCase):
+    def test_domain_backslash_form(self):
+        out = ("SMB 10.0.0.1 445 DC [+] lab.local\\: \n"
+               "SMB 10.0.0.1 445 DC lab.local\\Administrator badpwdcount: 0\n"
+               "SMB 10.0.0.1 445 DC lab.local\\jdoe badpwdcount: 1\n"
+               "SMB 10.0.0.1 445 DC lab.local\\DC01$ badpwdcount: 0\n")
+        self.assertEqual(EN._parse_nxc_users(out), ["Administrator", "jdoe"])
+
+    def test_bare_column_form(self):
+        out = ("SMB  10.0.0.1  445  DC  -Username-  -Last PW Set-\n"
+               "SMB  10.0.0.1  445  DC  Administrator  2023-01-01\n"
+               "SMB  10.0.0.1  445  DC  guest  <never>\n"
+               "SMB  10.0.0.1  445  DC  DC01$  2023-01-01\n")
+        self.assertEqual(EN._parse_nxc_users(out), ["Administrator", "guest"])
+
+
+class TestNxcAccessDenied(unittest.TestCase):
+    def test_denied_null_session_surfaced(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                        discovered_tools={"nxc": "/usr/bin/nxc"})
+        out = []
+        with mock.patch.object(EN, "run",
+                               return_value=(0, "SMB 10.10.10.10 445 DC [-] STATUS_ACCESS_DENIED", "")):
+            EN._enum_smb_nxc(cfg, _svc(445, "microsoft-ds"), out)
+        self.assertTrue(any("access denied" in f.summary for f in out),
+                        [f.summary for f in out])
+
+
+class TestKerberosTransparency(unittest.TestCase):
+    def test_zero_results_are_surfaced(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.gentle(),
+                        out_dir=tempfile.mkdtemp(),
+                        discovered_tools={"nmap": "/usr/bin/nmap",
+                                          "impacket-GetNPUsers": "/usr/bin/impacket-GetNPUsers"})
+        out = []
+        with mock.patch.object(EN, "run", return_value=(0, "", "")):
+            EN._enum_kerberos(cfg, _svc(88, "kerberos-sec"), out, "lab.local")
+        self.assertTrue(any("user enum: 0 of" in f.summary for f in out),
+                        [f.summary for f in out])
+        self.assertTrue(any("AS-REP roast: 0 roastable" in f.summary for f in out),
+                        [f.summary for f in out])
+
+
+class TestDCAttackLeads(unittest.TestCase):
+    def _dc_host(self):
+        h = R.HostResult(ip="10.10.10.10")
+        h.services = [_svc(88, "kerberos-sec"), _svc(389, "ldap"), _svc(445, "microsoft-ds")]
+        return h
+
+    def test_dc_cves_promoted_to_leads(self):
+        cfg = RunConfig(target="10.10.10.10", profile=Profile.lab(),
+                        discovered_tools={"nxc": "/usr/bin/nxc"})
+        exp = E.ExploitResult()
+        for c in E._ad_cve_candidates(cfg, self._dc_host()):
+            exp.candidates.append(c)
+        leads = RP._priority_leads(self._dc_host(), EN.EnumResult(), exp)
+        self.assertTrue(any("DC attack" in l and "Zerologon" in l for l in leads), leads)
+        # unauthenticated Zerologon ranks above credential-gated BloodHound
+        zl = next(i for i, l in enumerate(leads) if "Zerologon" in l)
+        bh = next(i for i, l in enumerate(leads) if "BloodHound" in l)
+        self.assertLess(zl, bh)
+
+
 class TestADToolDetection(unittest.TestCase):
     def test_ad_tools_probed(self):
         from vantage.config import detect_tools
