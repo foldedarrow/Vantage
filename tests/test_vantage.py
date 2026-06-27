@@ -1738,5 +1738,26 @@ class TestADToolDetection(unittest.TestCase):
             self.assertIn(tool, keys, tool)
 
 
+class TestVhostWildcard(unittest.TestCase):
+    def test_normal_vhosts_listed(self):
+        f = EN._vhost_finding(80, ["admin", "dev", "api"])
+        self.assertIsNotNone(f)
+        self.assertEqual(f.summary, "3 vhost(s)")
+        self.assertNotIn("vhost_wildcard", f.tags)
+        self.assertIn("admin", f.detail)
+
+    def test_catch_all_collapsed_to_one_note(self):
+        # A wildcard host (every Host matched) must not dump the whole wordlist —
+        # regression for the live HTB run that returned 5000 false vhosts.
+        f = EN._vhost_finding(80, [f"sub{i}" for i in range(5000)])
+        self.assertIsNotNone(f)
+        self.assertTrue(f.tags.get("vhost_wildcard"))
+        self.assertIn("catch-all", f.summary)
+        self.assertNotIn("sub0", f.detail or "")
+
+    def test_no_hits_returns_none(self):
+        self.assertIsNone(EN._vhost_finding(80, []))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

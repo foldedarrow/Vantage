@@ -24,6 +24,27 @@ from .. import wordlists
 # them out of the HTTP path; they get their own lightweight recon notes instead.
 _NON_WEB_HTTP_PORTS = {5985, 5986, 47001, 593, 9389}
 
+# vhost fuzzing backstop: if ffuf (even with auto-calibration) returns more than
+# this many "vhosts", the server is almost certainly serving the same page for any
+# Host header (wildcard/catch-all) — a live HTB run returned all 5000 wordlist
+# entries. Above the cap we record one wildcard note instead of dumping the noise.
+_VHOST_WILDCARD_CAP = 30
+
+def _vhost_finding(port: int, subs: list[str]):
+    """Turn ffuf vhost hits into an EnumFinding (or None). A result larger than
+    _VHOST_WILDCARD_CAP means the server is a catch-all (every Host matched), so we
+    collapse it to one informational note instead of dumping the whole wordlist."""
+    if not subs:
+        return None
+    if len(subs) > _VHOST_WILDCARD_CAP:
+        return EnumFinding(
+            port, "ffuf-vhost",
+            f"wildcard vhost — server accepted {len(subs)} Host values "
+            "(catch-all); no distinct vhosts identified",
+            tags={"vhost_wildcard": True})
+    return EnumFinding(port, "ffuf-vhost", f"{len(subs)} vhost(s)", "\n".join(subs))
+
+
 # A tiny curated set of AD accounts to try when no username wordlist is resolved.
 # Enough to catch the classic AS-REP-roastable service accounts on a lab DC
 # without the volume of a full SecLists run.
@@ -457,13 +478,18 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
     if cfg.hostname and _have(cfg, "ffuf", quiet=True):
         vwl = wordlists.vhost_wordlist(cfg)
         if vwl:
+            # -ac (auto-calibration): ffuf first learns the response for a
+            # non-existent vhost and filters anything matching it. Without this, a
+            # server that serves its default site for ANY Host header makes every
+            # wordlist entry "match" (a live HTB run returned all 5000). _VHOST_
+            # WILDCARD_CAP is a backstop for boxes -ac can't fully calibrate.
             rc, vf, _ = run(["ffuf", "-u", f"{scheme}://{cfg.target}:{svc.port}/",
                              "-H", f"Host: FUZZ.{cfg.hostname}", "-w", vwl,
-                             "-mc", "200,301,302,403", "-s"], timeout=180)
+                             "-mc", "200,301,302,403", "-ac", "-s"], timeout=180)
             subs = [l.strip() for l in vf.splitlines() if l.strip()]
-            if subs:
-                out.append(EnumFinding(svc.port, "ffuf-vhost", f"{len(subs)} vhost(s)",
-                                       "\n".join(subs)))
+            vf_finding = _vhost_finding(svc.port, subs)
+            if vf_finding:
+                out.append(vf_finding)
         else:
             warn_once("no-vhost-wordlist",
                       "no vhost/subdomain wordlist found (install SecLists or set "
