@@ -152,6 +152,26 @@ def build_parser() -> argparse.ArgumentParser:
     stealth.add_argument("--no-fragment", action="store_true",
                          help="Disable IP fragmentation (-f) in --stealth (some NICs/"
                               "hypervisors mangle fragments).")
+    # --- web intel + local-AI advisory (optional report enrichment) -----------
+    intel = p.add_argument_group(
+        "web intel + AI advisory (optional, opt-in report enrichment). --search is "
+        "the ONLY part of vantage that contacts anything other than the target.")
+    intel.add_argument("--search", action="store_true",
+                       help="Enrich the report with PUBLIC web/CVE context for the "
+                            "CVEs and software versions found (keyless DuckDuckGo + "
+                            "CIRCL CVE API, stdlib-only). Searches generic identifiers "
+                            "only — never the target's IP/hostname. Makes outbound "
+                            "requests; off by default.")
+    intel.add_argument("--search-cap", type=int, default=12,
+                       help="Max outbound search queries per run (default 12).")
+    intel.add_argument("--ai", action="store_true",
+                       help="Add a read-only AI advisory section: a LOCAL Ollama model "
+                            "triages the findings into prioritized risks + remediation. "
+                            "Advisory only — the model cannot run any tool (vantage "
+                            "still fires nothing). Needs Ollama running locally.")
+    intel.add_argument("--ai-model", default="",
+                       help="Ollama model for --ai (else $VANTAGE_AI_MODEL, default "
+                            "'llama3.1'). Endpoint via $VANTAGE_OLLAMA_URL.")
     # --- cloud recon (unauthenticated public-misconfiguration discovery) ------
     cloud = p.add_argument_group("cloud recon (unauthenticated misconfig discovery)")
     cloud.add_argument("--cloud", action="store_true",
@@ -203,6 +223,12 @@ def run_doctor(args=None) -> int:
     else:
         info("cloud recon: no helper tools (aws/s3scanner/cloud_enum) — the built-in "
              "anonymous HTTP probing still works. `apt install awscli` improves S3 results.")
+
+    # --- optional enrichment (web intel + local AI advisory) ---
+    info("web intel (--search): stdlib-only; needs outbound internet. No tool to "
+         "install. Searches generic identifiers only — never the target's address.")
+    info("AI advisory (--ai): needs a local Ollama (`ollama serve` + `ollama pull "
+         "llama3.1`). Read-only/advisory — the model cannot run any tool.")
 
     # --- SecLists / wordlist resolution ---
     from . import wordlists
@@ -454,6 +480,10 @@ def build_config(args) -> RunConfig:
         decoys=args.decoys,
         no_fragment=args.no_fragment,
         default_creds=not args.no_default_creds,
+        search=args.search,
+        search_cap=args.search_cap,
+        ai=args.ai,
+        ai_model=args.ai_model,
         seclists_dir=args.seclists_dir,
         klass=klass,
         lab_nets=lab_nets,
@@ -628,8 +658,24 @@ def main(argv=None) -> int:
         else:
             warn("cloud recon skipped: authorization not confirmed.")
 
+    # Optional report enrichment (both opt-in, both degrade to "" on any failure).
+    web_intel = ""
+    if cfg.search:
+        from .modules import search as search_mod
+        banner("WEB INTEL (public sources)")
+        web_intel = search_mod.enrich_report(cfg, host, exp_res)
+        event(cfg, "search_done", chars=len(web_intel))
+
+    analysis = ""
+    if cfg.ai:
+        from .modules import advise as advise_mod
+        banner("AI ANALYSIS (advisory — local model)")
+        analysis = advise_mod.advise(cfg, host, enum_res, exp_res)
+        event(cfg, "ai_done", chars=len(analysis))
+
     banner("PHASE 4 — REPORT")
-    md, js = report.write_reports(cfg, host, enum_res, exp_res)
+    md, js = report.write_reports(cfg, host, enum_res, exp_res,
+                                  web_intel=web_intel, analysis=analysis)
     event(cfg, "run_done", report=md)
     good(f"Done. Open {md} for the readable report.")
     if exp_res.candidates:
