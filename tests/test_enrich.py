@@ -43,10 +43,35 @@ class TestSearchParsing(unittest.TestCase):
         self.assertEqual(hits[0].url, "https://exploit-db.com/123")
         self.assertIn("smiley backdoor", hits[0].snippet)
 
-    def test_product_strips_version_and_parens(self):
-        self.assertEqual(S._product("Apache httpd 2.2.8 ((Ubuntu))"), "Apache httpd")
-        self.assertEqual(S._product("vsftpd 2.3.4"), "vsftpd")
-        self.assertEqual(S._product(""), "")
+    def test_query_from_banner(self):
+        # Cut at the END of the first version token, keep build suffixes.
+        self.assertEqual(S._query_from_banner("nginx 1.24.0 Ubuntu"), "nginx 1.24.0")
+        self.assertEqual(S._query_from_banner("Apache httpd 2.2.8 ((Ubuntu))"),
+                         "Apache httpd 2.2.8")
+        self.assertEqual(S._query_from_banner("vsftpd 2.3.4"), "vsftpd 2.3.4")
+        self.assertEqual(S._query_from_banner("Samba smbd"), "Samba smbd")  # no version
+        self.assertEqual(S._query_from_banner(""), "")
+
+    def test_query_from_banner_ignores_protocol_tail(self):
+        # Regression for the live HTB run: the SSH banner's 'protocol 2.0' tail must
+        # NOT become the version — the real version (9.6p1) appears first.
+        b = "OpenSSH 9.6p1 Ubuntu 3ubuntu13.15 Ubuntu Linux; protocol 2.0"
+        self.assertEqual(S._query_from_banner(b), "OpenSSH 9.6p1")
+        self.assertNotIn("2.0", S._query_from_banner(b))
+
+    def test_looks_blocked_detects_anomaly_page(self):
+        # DDG's bot-detection page has no result anchors and mentions 'anomaly'.
+        self.assertTrue(S._looks_blocked("<html>...anomaly detected...</html>"))
+        self.assertFalse(S._looks_blocked('x<a class="result__a" href="u">t</a>' * 50))
+
+    def test_parse_lite_layout(self):
+        # The lite-endpoint fallback uses a different anchor class.
+        html = ('<a class="result-link" href="https://example.com/x">Title X</a>'
+                '<td class="result-snippet">a snippet</td>')
+        hits = S._parse_ddg_html(html, 5)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].url, "https://example.com/x")
+        self.assertEqual(hits[0].title, "Title X")
 
     def test_parse_cve_5x_record(self):
         # The CVE 5.x Record Format CIRCL serves: description + CVSS live under
