@@ -254,11 +254,14 @@ def _query_from_banner(banner: str) -> str:
 
 
 # --- report enrichment -------------------------------------------------------
-def enrich_report(cfg: RunConfig, host: HostResult, exploits: ExploitResult) -> str:
-    """Build a Markdown 'Web intel' block: CVE summaries for NSE-flagged CVEs and
-    exploit references for fingerprinted software. Bounded by cfg.search_cap total
-    queries (politeness + the global time budget). Returns "" if nothing useful or
-    if the network is unavailable."""
+def enrich_report(cfg: RunConfig, host: HostResult, exploits: ExploitResult,
+                  enum=None) -> str:
+    """Build a Markdown 'Web intel' block: CVE summaries for NSE-flagged CVEs,
+    exploit references for fingerprinted software (nmap banners), and — when `enum`
+    is supplied — for web applications whatweb fingerprinted (e.g. Flowise), which
+    are not nmap services and were previously missed. Bounded by cfg.search_cap
+    total queries (politeness + the global time budget). Returns "" if nothing
+    useful or if the network is unavailable."""
     cap = getattr(cfg, "search_cap", 12) or 12
     # Never search the target's own identity — keep the engagement private.
     blocked = {x.lower() for x in (cfg.target, cfg.hostname) if x}
@@ -310,6 +313,30 @@ def enrich_report(cfg: RunConfig, host: HostResult, exploits: ExploitResult) -> 
         refs.append(f"- **:{s.port}** `{query}`")
         for h in hits:
             refs.append(f"  - [{h.title}]({h.url})")
+
+    # 2b. Web applications fingerprinted by whatweb (Flowise, Grafana, …). These
+    #     aren't nmap services, so search for app-level exploits/CVEs too.
+    if enum is not None:
+        for f in getattr(enum, "findings", []):
+            if used >= cap:
+                break
+            app = (f.tags or {}).get("app")
+            if not app:
+                continue
+            ver = (f.tags or {}).get("app_version", "")
+            query = (app.split(" admin")[0] + (" " + ver if ver else "")).strip()
+            key = query.lower()
+            if not query or key in seen or any(b in key for b in blocked):
+                continue
+            seen.add(key)
+            hits = web_search(query + " exploit CVE", max_results=3)
+            used += 1
+            if not hits:
+                continue
+            refs.append(f"- **:{f.service_port}** `{query}` _(web app)_")
+            for h in hits:
+                refs.append(f"  - [{h.title}]({h.url})")
+
     if refs:
         L.append("### Exploit references")
         L.extend(refs)

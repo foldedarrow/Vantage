@@ -299,16 +299,33 @@ _WEB_APP_SIGNATURES = [
     ("title[portainer", "Portainer", True, "Initial-admin race / weak creds; manages Docker."),
     ("kibana", "Kibana", True, "Check version against known prototype-pollution/RCE CVEs."),
     ("title[adminer", "Adminer", True, "DB admin at this path; try default DB creds; SSRF CVEs."),
+    ("flowise", "Flowise", True,
+     "Low-code LLM-app builder. Check the version for CVE-2024-31621 (auth bypass via "
+     "URL path-case, e.g. /api/v1 -> /Api/V1), then enumerate /api/v1/credentials, "
+     "/api/v1/variables and /api/v1/chatflows for leaked secrets; `searchsploit flowise`."),
 ]
 
 
-def _identify_web_app(ww: str) -> tuple[str, bool, str] | None:
-    """Return (app, sensitive, hint) for the first known web app matched in the
-    whatweb output, else None."""
+def _extract_app_version(ww: str, name: str) -> str:
+    """Best-effort app version from whatweb output. whatweb plugin tokens read like
+    'WordPress[6.1.1]'; titles sometimes read 'AppName 1.2.3'. Returns '' when no
+    version is exposed — a version-less query still finds general CVEs for the app."""
+    base = name.split()[0]   # 'Pi-hole admin' -> 'Pi-hole'
+    for pat in (rf"{re.escape(base)}\[[^\]]*?(\d+\.\d+(?:\.\d+)*)",
+                rf"{re.escape(base)}[ /v]+(\d+\.\d+(?:\.\d+)*)"):
+        m = re.search(pat, ww, re.I)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _identify_web_app(ww: str) -> tuple[str, str, bool, str] | None:
+    """Return (app, version, sensitive, hint) for the first known web app matched in
+    the whatweb output, else None. Version is '' when not disclosed."""
     low = ww.lower()
     for sig, name, sensitive, hint in _WEB_APP_SIGNATURES:
         if sig in low:
-            return name, sensitive, hint
+            return name, _extract_app_version(ww, name), sensitive, hint
     return None
 
 
@@ -375,11 +392,14 @@ def _enum_http(cfg: RunConfig, svc: Service, out: list[EnumFinding]) -> None:
             # creds, app CVEs) instead of just a stack list (#3).
             app = _identify_web_app(ww)
             if app:
-                name, sensitive, hint = app
+                name, app_ver, sensitive, hint = app
                 atags = {"app": name, "app_url": base}
+                if app_ver:
+                    atags["app_version"] = app_ver
                 if sensitive:
                     atags["web_panel"] = True
-                out.append(EnumFinding(svc.port, "web-app", f"{name} detected", hint, tags=atags))
+                title = (f"{name} {app_ver}".strip()) + " detected"
+                out.append(EnumFinding(svc.port, "web-app", title, hint, tags=atags))
             low = ww.lower()
             for c in ("wordpress", "drupal", "joomla"):
                 if c in low:

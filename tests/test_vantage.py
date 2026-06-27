@@ -1047,10 +1047,29 @@ class TestWebFingerprint(unittest.TestCase):
         app = EN._identify_web_app("http://x [403] Title[Pi-hole pihole], IP[10.0.0.1]")
         self.assertIsNotNone(app)
         self.assertEqual(app[0], "Pi-hole admin")
-        self.assertTrue(app[1])               # sensitive -> mgmt panel
+        self.assertEqual(app[1], "")          # no version disclosed
+        self.assertTrue(app[2])               # sensitive -> mgmt panel
 
     def test_identify_no_app(self):
         self.assertIsNone(EN._identify_web_app("Title[Just a personal blog]"))
+
+    def test_identify_flowise_app(self):
+        # Regression for the live HTB box: Flowise is detected via title/meta, and
+        # its hint must point at the CVE-2024-31621 auth-bypass path.
+        ww = ("http://staging.silentium.htb:80 [200 OK] Meta-Author[FlowiseAI], "
+              "Title[Flowise - Build AI Agents, Visually], nginx[1.24.0]")
+        app = EN._identify_web_app(ww)
+        self.assertIsNotNone(app)
+        self.assertEqual(app[0], "Flowise")
+        self.assertTrue(app[2])
+        self.assertIn("CVE-2024-31621", app[3])
+
+    def test_extract_app_version(self):
+        self.assertEqual(EN._extract_app_version("WordPress[6.1.1], HTML5", "WordPress"),
+                         "6.1.1")
+        self.assertEqual(EN._extract_app_version("Title[Grafana v9.5.2]", "Grafana"),
+                         "9.5.2")
+        self.assertEqual(EN._extract_app_version("Title[Flowise]", "Flowise"), "")
 
     def test_web_panel_promoted_to_lead(self):
         en = EN.EnumResult()

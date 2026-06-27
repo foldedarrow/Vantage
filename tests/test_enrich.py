@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vantage.config import Profile, RunConfig
 from vantage.modules.recon import HostResult, Service
-from vantage.modules.enumerate import EnumResult
+from vantage.modules.enumerate import EnumResult, EnumFinding
 from vantage.modules.exploit import ExploitResult, ExploitCandidate
 from vantage.modules import search as S
 from vantage.modules import advise as A
@@ -119,6 +119,23 @@ class TestEnrichPrivacy(unittest.TestCase):
             S.web_search = orig
         self.assertFalse(any("box.htb" in q.lower() or "10.10.10.5" in q
                              for q in captured), captured)
+
+    def test_enrich_searches_whatweb_app(self):
+        # A whatweb-fingerprinted app (Flowise) must be fed into the exploit/CVE
+        # lookup even though it isn't an nmap service.
+        captured = []
+        orig = S.web_search
+        S.web_search = lambda q, **k: captured.append(q) or []
+        try:
+            enum = EnumResult()
+            enum.findings.append(EnumFinding(
+                service_port=80, tool="web-app", summary="Flowise detected",
+                tags={"app": "Flowise", "app_version": "1.4.3"}))
+            cfg = self._cfg(search_cap=5)
+            S.enrich_report(cfg, HostResult(ip="10.10.10.5"), ExploitResult(), enum=enum)
+        finally:
+            S.web_search = orig
+        self.assertTrue(any("Flowise 1.4.3" in q for q in captured), captured)
 
     def test_enrich_respects_query_cap(self):
         captured = []

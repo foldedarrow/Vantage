@@ -663,7 +663,7 @@ def main(argv=None) -> int:
     if cfg.search:
         from .modules import search as search_mod
         banner("WEB INTEL (public sources)")
-        web_intel = search_mod.enrich_report(cfg, host, exp_res)
+        web_intel = search_mod.enrich_report(cfg, host, exp_res, enum=enum_res)
         event(cfg, "search_done", chars=len(web_intel))
 
     analysis = ""
