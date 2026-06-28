@@ -584,8 +584,9 @@ class TestCVEBridge(unittest.TestCase):
 
 
 class TestExternalProfilePrompt(unittest.TestCase):
-    """Authorized external targets prompt for lab-vs-gentle instead of forcing
-    gentle. --profile lab / --yes skip the prompt; auto prompts."""
+    """Authorized external targets default to the bounded 'external' profile and
+    prompt for an optional lab upgrade. --profile lab / --yes skip the prompt;
+    auto prompts."""
     from vantage import cli as _CLI
 
     def _cfg(self, *extra):
@@ -593,10 +594,10 @@ class TestExternalProfilePrompt(unittest.TestCase):
             ["203.0.113.5", "--allow-external", *extra])
         return self._CLI.build_config(args)
 
-    def test_external_starts_gentle_on_auto(self):
+    def test_external_starts_external_profile_on_auto(self):
         cfg = self._cfg()
         self.assertEqual(cfg.klass, "external")
-        self.assertIn("gentle", cfg.profile.name)
+        self.assertIn("external", cfg.profile.name)
         self.assertTrue(cfg.profile_is_auto)
 
     def test_yes_to_upgrade_gives_lab(self):
@@ -606,12 +607,12 @@ class TestExternalProfilePrompt(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("lab", cfg.profile.name)
 
-    def test_no_to_upgrade_stays_gentle(self):
+    def test_no_to_upgrade_stays_external(self):
         cfg = self._cfg()
         with mock.patch("builtins.input", side_effect=["n", "y"]):
             ok = self._CLI.authorization_gate(cfg, assume_yes=False, allow_external=True)
         self.assertTrue(ok)
-        self.assertIn("gentle", cfg.profile.name)
+        self.assertIn("external", cfg.profile.name)
 
     def test_explicit_lab_profile_skips_prompt(self):
         cfg = self._cfg("--profile", "lab")
@@ -623,12 +624,12 @@ class TestExternalProfilePrompt(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(m.call_count, 1)
 
-    def test_yes_flag_no_prompt_keeps_gentle(self):
+    def test_yes_flag_no_prompt_keeps_external(self):
         cfg = self._cfg()
-        # --yes path: no interactive upgrade, external stays gentle
+        # --yes path: no interactive upgrade, external stays on the external profile
         ok = self._CLI.authorization_gate(cfg, assume_yes=True, allow_external=True)
         self.assertTrue(ok)
-        self.assertIn("gentle", cfg.profile.name)
+        self.assertIn("external", cfg.profile.name)
 
     def test_external_aggressive_allowed_with_allow_external(self):
         cfg = self._cfg("--aggressive")
@@ -1179,6 +1180,37 @@ class TestStealth(unittest.TestCase):
         cfg = cli.build_config(cli.build_parser().parse_args(
             ["10.0.0.5", "--stealth", "--aggressive"]))
         self.assertFalse(cfg.aggressive)
+
+
+class TestExternalProfile(unittest.TestCase):
+    """The 'external' profile: bounded, fast service ID over the internet — the
+    default for public targets on --profile auto, and explicitly selectable."""
+
+    def test_factory_is_bounded_and_quiet(self):
+        p = Profile.external()
+        self.assertIn("external", p.name)
+        self.assertFalse(p.full_tcp)                 # top-ports, not -p-
+        self.assertEqual(p.nmap_timing, "-T3")       # not the glacial -T1
+        self.assertIn("--host-timeout", p.nmap_args) # one host can't pin the run
+        self.assertFalse(p.nse_vuln)                 # no loud vuln scripts
+        self.assertFalse(p.enable_nikto)
+        self.assertFalse(p.enable_active_web)
+
+    def test_auto_picks_external_for_public_ip(self):
+        from vantage import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(["1.1.1.1"]))
+        self.assertIn("external", cfg.profile.name)  # was gentle before
+
+    def test_explicit_profile_external(self):
+        from vantage import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(
+            ["10.0.0.5", "--profile", "external"]))
+        self.assertIn("external", cfg.profile.name)  # honoured even for an RFC1918 IP
+
+    def test_rfc1918_still_lab_on_auto(self):
+        from vantage import cli
+        cfg = cli.build_config(cli.build_parser().parse_args(["192.168.56.50"]))
+        self.assertIn("lab", cfg.profile.name)       # external default didn't bleed in
 
 
 class TestMetasploitableFixes(unittest.TestCase):
