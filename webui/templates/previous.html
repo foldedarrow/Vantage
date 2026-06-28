@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_macros.html" import stopped_card %}
+{% block title %}vantage — previous scans{% endblock %}
+{% block content %}
+
+<h1>Previous scans</h1>
+<p class="muted" style="margin-top:-6px">Runs that were started but didn't finish (Ctrl-C / killed) — no report written.</p>
+
+{% if stopped %}
+<div class="grid">
+  {% for s in stopped %}{{ stopped_card(s) }}{% endfor %}
+</div>
+{% else %}
+<div class="empty">No stopped or incomplete runs. Finished scans live under
+  <a href="/reports">Reports</a>.</div>
+{% endif %}
+
+{% endblock %}

@@ -255,11 +255,41 @@ def list_stopped() -> list[dict]:
 
 
 # --- routes ------------------------------------------------------------------
+@app.context_processor
+def _inject_nav():
+    """Expose the loot dir + live-scan count to every template so the nav bar
+    can render its path chip and the 'Ongoing' badge on any page."""
+    try:
+        return {"loot": loot_dir(), "nav_live_count": len(list_live())}
+    except Exception:  # noqa: BLE001 — the nav must never break a page render
+        return {"loot": "", "nav_live_count": 0}
+
+
 @app.route("/")
 def index():
     return render_template("index.html", targets=list_targets(),
                            sweeps=list_sweeps(), live=list_live(),
-                           stopped=list_stopped(), loot=loot_dir())
+                           stopped=list_stopped(), nav="dashboard")
+
+
+@app.route("/reports")
+def reports():
+    return render_template("reports.html", targets=list_targets(), nav="reports")
+
+
+@app.route("/ongoing")
+def ongoing():
+    return render_template("ongoing.html", live=list_live(), nav="ongoing")
+
+
+@app.route("/previous")
+def previous():
+    return render_template("previous.html", stopped=list_stopped(), nav="previous")
+
+
+@app.route("/sweeps")
+def sweeps():
+    return render_template("sweeps.html", sweeps=list_sweeps(), nav="sweeps")
 
 
 def _proc_alive(slug: str) -> bool:

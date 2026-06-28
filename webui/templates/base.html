@@ -58,9 +58,26 @@
     header .logo a { color:inherit; }
     header .logo .br { color:var(--accent-dim); }
     header .sub { color:var(--muted); letter-spacing:1.5px; text-transform:uppercase; font-size:11px; }
-    header .loot { color:var(--muted); font-size:11px; margin-left:auto;
+    header .loot { color:var(--muted); font-size:11px;
       border:1px solid var(--border); border-radius:4px; padding:3px 9px; }
     header .loot::before { content:"◇ "; color:var(--accent-dim); }
+    header .spacer { margin-left:auto; }
+
+    /* ---- nav tabs ------------------------------------------------------ */
+    nav.tabs { display:flex; gap:4px; flex-wrap:wrap; }
+    nav.tabs a { position:relative; color:var(--muted); font-size:11.5px;
+      text-transform:uppercase; letter-spacing:1.5px; padding:6px 13px; border-radius:4px;
+      border:1px solid transparent; transition:.15s; }
+    nav.tabs a:hover { color:var(--fg); border-color:var(--border); text-shadow:none;
+      background:rgba(0,229,255,.05); }
+    nav.tabs a.on { color:var(--accent); border-color:var(--accent);
+      background:rgba(0,229,255,.08); text-shadow:var(--glow);
+      box-shadow:0 0 12px rgba(0,229,255,.18), inset 0 0 12px rgba(0,229,255,.06); }
+    nav.tabs a .badge { display:inline-block; min-width:16px; margin-left:6px; padding:0 5px;
+      font-size:10px; line-height:15px; text-align:center; color:#021015; background:var(--accent);
+      border-radius:9px; box-shadow:0 0 8px rgba(0,229,255,.55); }
+    .newscan.sm { padding:6px 14px; font-size:11px; }
+    .viewall { font-size:11.5px; letter-spacing:1px; text-transform:uppercase; }
 
     main { max-width:1120px; margin:0 auto; padding:26px 24px 60px; }
     h1,h2,h3 { line-height:1.2; letter-spacing:1px; }
@@ -168,9 +185,18 @@
   </style>
 </head>
 <body>
+  {% set nav = nav|default('') %}
   <header>
     <span class="logo"><a href="/"><span class="br">[</span>VANTAGE<span class="br">]</span></a></span>
-    <span class="sub">// recon uplink</span>
+    <nav class="tabs">
+      <a href="/" class="{{ 'on' if nav == 'dashboard' }}">Dashboard</a>
+      <a href="/reports" class="{{ 'on' if nav == 'reports' }}">Reports</a>
+      <a href="/ongoing" class="{{ 'on' if nav == 'ongoing' }}">Ongoing{% if nav_live_count %}<span class="badge">{{ nav_live_count }}</span>{% endif %}</a>
+      <a href="/previous" class="{{ 'on' if nav == 'previous' }}">Previous</a>
+      <a href="/sweeps" class="{{ 'on' if nav == 'sweeps' }}">Sweeps</a>
+    </nav>
+    <span class="spacer"></span>
+    <a href="/scan" class="newscan sm">▶ New scan</a>
     <span class="loot">{{ loot if loot else '' }}</span>
   </header>
   <main>{% block content %}{% endblock %}</main>

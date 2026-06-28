@@ -1,74 +1,27 @@
 {% extends "base.html" %}
-{% block title %}vantage — targets{% endblock %}
+{% from "_macros.html" import target_card, live_card, stopped_card, sweep_card %}
+{% block title %}vantage — dashboard{% endblock %}
 {% block content %}
 
-<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
-  <a href="/scan" class="newscan">▶ New scan</a>
-</div>
+<h1>Dashboard</h1>
 
 {% if live %}
-<h2>● Live scans</h2>
+<div style="display:flex;align-items:baseline;gap:14px">
+  <h2>● Ongoing scans</h2>
+  <a class="viewall" href="/ongoing">view all →</a>
+</div>
 <div class="grid">
-  {% for s in live %}
-  <div class="card" style="border-left:3px solid var(--green)">
-    <h3><a href="/live/{{ s.slug }}">{{ s.slug }}</a> <span class="live-dot">●</span></h3>
-    <div class="meta">
-      {% if s.status.current %}
-        <span>▶ running <b>{{ s.status.current.tool }}</b></span>
-      {% else %}
-        <span>… {{ s.status.phase or 'working' }}</span>
-      {% endif %}
-      <span>{{ s.status.n_events }} events</span>
-    </div>
-    {% if s.status.current %}<div class="muted" style="font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.status.current.cmd }}</div>{% endif %}
-    <div style="display:flex;gap:14px;align-items:center">
-      <a href="/live/{{ s.slug }}">watch live →</a>
-      <form method="post" action="/scan/{{ s.slug }}/stop" style="margin:0">
-        <button type="submit" class="stopbtn">■ stop</button>
-      </form>
-    </div>
-  </div>
-  {% endfor %}
+  {% for s in live %}{{ live_card(s) }}{% endfor %}
 </div>
 {% endif %}
 
-{% if sweeps %}
-<h2>CIDR sweeps</h2>
-<div class="grid">
-  {% for s in sweeps %}
-  <div class="card">
-    <h3><a href="/sweep/{{ s.slug }}">{{ s.slug }}</a></h3>
-    <div class="meta">sweep index</div>
-  </div>
-  {% endfor %}
+<div style="display:flex;align-items:baseline;gap:14px">
+  <h2>Reports</h2>
+  {% if targets %}<a class="viewall" href="/reports">view all ({{ targets|length }}) →</a>{% endif %}
 </div>
-{% endif %}
-
-<h2>Targets</h2>
 {% if targets %}
 <div class="grid">
-  {% for t in targets %}
-  <div class="card">
-    <h3><a href="/report/{{ t.slug }}">{{ t.target }}</a></h3>
-    <div class="meta">
-      {% if t.klass %}<span class="pill {{ t.klass }}">{{ t.klass }}</span>{% endif %}
-      {% if t.profile %}<span>{{ t.profile }}</span>{% endif %}
-      {% if t.generated %}<span>{{ t.generated }}</span>{% endif %}
-    </div>
-    <div class="stats">
-      <div><div class="n">{{ t.n_services }}</div><div class="l">services</div></div>
-      <div><div class="n">{{ t.n_findings }}</div><div class="l">findings</div></div>
-      <div><div class="n">{{ t.n_candidates }}</div><div class="l">candidates</div></div>
-    </div>
-    {% if t.top_leads %}
-    <ol class="leads">
-      {% for lead in t.top_leads %}<li>{{ lead|safe }}</li>{% endfor %}
-    </ol>
-    {% else %}
-    <div class="muted">No priority leads.</div>
-    {% endif %}
-  </div>
-  {% endfor %}
+  {% for t in targets[:6] %}{{ target_card(t) }}{% endfor %}
 </div>
 {% elif not live and not stopped %}
 <div class="empty">
@@ -76,22 +29,27 @@
   Run vantage first (e.g. <code>python run.py 192.168.56.101</code>), or point the
   dashboard at the right loot dir with <code>--loot</code> / <code>$VANTAGE_LOOT</code>.
 </div>
+{% else %}
+<div class="muted">No completed reports yet.</div>
+{% endif %}
+
+{% if sweeps %}
+<div style="display:flex;align-items:baseline;gap:14px">
+  <h2>CIDR sweeps</h2>
+  <a class="viewall" href="/sweeps">view all →</a>
+</div>
+<div class="grid">
+  {% for s in sweeps[:3] %}{{ sweep_card(s) }}{% endfor %}
+</div>
 {% endif %}
 
 {% if stopped %}
-<h2 class="muted">Stopped / incomplete</h2>
+<div style="display:flex;align-items:baseline;gap:14px">
+  <h2 style="color:var(--muted);border-color:var(--border)">Previous / incomplete</h2>
+  <a class="viewall" href="/previous">view all →</a>
+</div>
 <div class="grid">
-  {% for s in stopped %}
-  <div class="card" style="opacity:.6">
-    <h3>{{ s.slug }} <span class="muted">○ stopped</span></h3>
-    <div class="meta">
-      <span>last: {{ s.status.phase or s.last }}</span>
-      <span>{{ s.status.n_events }} events</span>
-      {% if s.status.age is not none %}<span>idle {{ s.status.age }}s</span>{% endif %}
-    </div>
-    <div class="muted" style="font-size:12px">Run didn't finish (Ctrl-C / killed). No report written.</div>
-  </div>
-  {% endfor %}
+  {% for s in stopped[:3] %}{{ stopped_card(s) }}{% endfor %}
 </div>
 {% endif %}
 

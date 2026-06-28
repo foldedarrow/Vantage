@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sweep_card %}
+{% block title %}vantage — sweeps{% endblock %}
+{% block content %}
+
+<h1>CIDR sweeps</h1>
+<p class="muted" style="margin-top:-6px">Range sweeps — each links to its per-host index.</p>
+
+{% if sweeps %}
+<div class="grid">
+  {% for s in sweeps %}{{ sweep_card(s) }}{% endfor %}
+</div>
+{% else %}
+<div class="empty">No sweeps yet. Scan a CIDR (e.g. <code>10.0.0.0/24</code>) from
+  <a href="/scan">▶ New scan</a>.</div>
+{% endif %}
+
+{% endblock %}

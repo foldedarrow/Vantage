@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% from "_macros.html" import target_card %}
+{% block title %}vantage — reports{% endblock %}
+{% block content %}
+
+<h1>Reports</h1>
+<p class="muted" style="margin-top:-6px">Completed scans that produced a report — ranked priority leads up front.</p>
+
+{% if targets %}
+<div class="grid">
+  {% for t in targets %}{{ target_card(t) }}{% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  No reports in <code>{{ loot }}</code> yet. Start one from
+  <a href="/scan">▶ New scan</a>.
+</div>
+{% endif %}
+
+{% endblock %}

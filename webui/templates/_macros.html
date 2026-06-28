@@ -1,0 +1,67 @@
+{# Reusable card markup shared by the dashboard and the per-tab pages. #}
+
+{% macro target_card(t) %}
+<div class="card">
+  <h3><a href="/report/{{ t.slug }}">{{ t.target }}</a></h3>
+  <div class="meta">
+    {% if t.klass %}<span class="pill {{ t.klass }}">{{ t.klass }}</span>{% endif %}
+    {% if t.profile %}<span>{{ t.profile }}</span>{% endif %}
+    {% if t.generated %}<span>{{ t.generated }}</span>{% endif %}
+  </div>
+  <div class="stats">
+    <div><div class="n">{{ t.n_services }}</div><div class="l">services</div></div>
+    <div><div class="n">{{ t.n_findings }}</div><div class="l">findings</div></div>
+    <div><div class="n">{{ t.n_candidates }}</div><div class="l">candidates</div></div>
+  </div>
+  {% if t.top_leads %}
+  <ol class="leads">{% for lead in t.top_leads %}<li>{{ lead|safe }}</li>{% endfor %}</ol>
+  {% else %}
+  <div class="muted">No priority leads.</div>
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro live_card(s) %}
+<div class="card" style="border-left:3px solid var(--accent)">
+  <h3><a href="/live/{{ s.slug }}">{{ s.slug }}</a> <span class="live-dot">●</span></h3>
+  <div class="meta">
+    {% if s.status.current %}<span>▶ running <b>{{ s.status.current.tool }}</b></span>
+    {% else %}<span>… {{ s.status.phase or 'working' }}</span>{% endif %}
+    <span>{{ s.status.n_events }} events</span>
+  </div>
+  {% if s.status.current %}<div class="muted" style="font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.status.current.cmd }}</div>{% endif %}
+  {% if s.status.current and s.status.current.progress and s.status.current.progress.percent is not none %}
+  {% set p = s.status.current.progress %}
+  <div class="progress">
+    <div class="track"><div class="fill" style="width:{{ p.percent|round|int }}%"></div></div>
+    <span class="lbl">{{ p.percent|round|int }}% done{% if p.remaining %} · ~{{ p.remaining }} remaining{% endif %}{% if p.phase %} · {{ p.phase }}{% endif %}</span>
+  </div>
+  {% endif %}
+  <div style="display:flex;gap:14px;align-items:center;margin-top:10px">
+    <a href="/live/{{ s.slug }}">watch live →</a>
+    <form method="post" action="/scan/{{ s.slug }}/stop" style="margin:0">
+      <button type="submit" class="stopbtn">■ stop</button>
+    </form>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro stopped_card(s) %}
+<div class="card" style="opacity:.62">
+  <h3>{{ s.slug }} <span class="muted">○ stopped</span></h3>
+  <div class="meta">
+    <span>last: {{ s.status.phase or s.last }}</span>
+    <span>{{ s.status.n_events }} events</span>
+    {% if s.status.age is not none %}<span>idle {{ s.status.age }}s</span>{% endif %}
+  </div>
+  <div class="muted" style="font-size:12px">Run didn't finish (Ctrl-C / killed). No report written.</div>
+  <div style="margin-top:8px"><a href="/live/{{ s.slug }}">view timeline →</a></div>
+</div>
+{% endmacro %}
+
+{% macro sweep_card(s) %}
+<div class="card">
+  <h3><a href="/sweep/{{ s.slug }}">{{ s.slug }}</a></h3>
+  <div class="meta">CIDR sweep index</div>
+</div>
+{% endmacro %}
