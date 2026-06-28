@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% from "_macros.html" import live_card %}
+{% block title %}vantage — ongoing scans{% endblock %}
+{% block content %}
+
+<h1>Ongoing scans</h1>
+<p class="muted" style="margin-top:-6px">Scans running right now, with live nmap progress.</p>
+
+{% if live %}
+<div class="grid">
+  {% for s in live %}{{ live_card(s) }}{% endfor %}
+</div>
+<script>
+  // keep the running cards fresh
+  setTimeout(() => location.reload(), 5000);
+</script>
+{% else %}
+<div class="empty">
+  Nothing running. Launch a scan from <a href="/scan">▶ New scan</a>.
+</div>
+{% endif %}
+
+{% endblock %}
