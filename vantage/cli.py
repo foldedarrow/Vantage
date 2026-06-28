@@ -172,6 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
     intel.add_argument("--ai-model", default="",
                        help="Ollama model for --ai (else $VANTAGE_AI_MODEL, default "
                             "'llama3.1'). Endpoint via $VANTAGE_OLLAMA_URL.")
+    intel.add_argument("--export-ptt", action="store_true",
+                       help="Also write a Pentesting Task Tree handoff JSON "
+                            "(handoff_<target>.json, schema vantage.ptt/v1): the "
+                            "findings reshaped into a host->service->tasks tree an "
+                            "agent (e.g. PentestGPT) can consume. Reshape only — "
+                            "vantage still runs nothing and never invokes the agent; "
+                            "scope/authorization travels with the file.")
     # --- cloud recon (unauthenticated public-misconfiguration discovery) ------
     cloud = p.add_argument_group("cloud recon (unauthenticated misconfig discovery)")
     cloud.add_argument("--cloud", action="store_true",
@@ -510,6 +517,7 @@ def build_config(args) -> RunConfig:
         search_cap=args.search_cap,
         ai=args.ai,
         ai_model=args.ai_model,
+        export_ptt=args.export_ptt,
         seclists_dir=args.seclists_dir,
         klass=klass,
         lab_nets=lab_nets,
@@ -702,6 +710,10 @@ def main(argv=None) -> int:
     banner("PHASE 4 — REPORT")
     md, js = report.write_reports(cfg, host, enum_res, exp_res,
                                   web_intel=web_intel, analysis=analysis)
+    if cfg.export_ptt:
+        from .modules import handoff as handoff_mod
+        hpath = handoff_mod.write_handoff(cfg, host, enum_res, exp_res, analysis=analysis)
+        event(cfg, "handoff_done", handoff=hpath)
     event(cfg, "run_done", report=md)
     good(f"Done. Open {md} for the readable report.")
     if exp_res.candidates:

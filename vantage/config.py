@@ -165,6 +165,7 @@ class RunConfig:
     search_cap: int = 12             # max outbound search queries per run (politeness)
     ai: bool = False                 # run the local-LLM advisory pass (read-only)
     ai_model: str = ""               # Ollama model name (else $VANTAGE_AI_MODEL / default)
+    export_ptt: bool = False         # write a Pentesting Task Tree handoff JSON (agent-consumable)
     # --- scope / authorization (issues #1, #2, #4) ----------------------------
     klass: str = "external"          # 'htb' | 'lab' | 'external' (set by cli)
     lab_nets: tuple = ()             # operator-declared lab CIDRs (--lab-net); beat built-in HTB

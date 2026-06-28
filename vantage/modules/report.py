@@ -190,9 +190,11 @@ def _priority_leads(host, enum, exploits) -> list[str]:
         t = f.tags or {}
         if t.get("confirmed_cred"):
             where = t.get("cred_path") or t.get("cred_app") or ""
+            # mask the password half — the lead is rendered in the Markdown report
+            # and exported in the PTT handoff; show the user/app, never the secret.
             tiers.append((1, f"**Confirmed creds** · :{f.service_port} — "
                              f"{t.get('cred_app', 'service')} "
-                             f"`{t['confirmed_cred']}`"
+                             f"`{_mask_cred_list(t['confirmed_cred'])}`"
                              + (f" at {where}" if t.get("cred_path") else "")))
 
     # 2. Anonymous / unauthenticated access surfaced during enumeration.

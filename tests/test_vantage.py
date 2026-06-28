@@ -6,6 +6,7 @@ SNMP community handling. Run: python -m unittest discover -s tests
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -1393,8 +1394,11 @@ class TestNiktoLeadExtraction(unittest.TestCase):
         enum = EN.EnumResult()
         enum.findings.extend(EN._nikto_findings(8180, self._HITS))
         leads = RP._priority_leads(R.HostResult(ip="10.0.0.1"), enum, E.ExploitResult())
-        self.assertTrue(any("Confirmed creds" in l and "tomcat:tomcat" in l
+        # the lead surfaces the cred app + username but masks the password half —
+        # it's rendered in the report and exported in the PTT handoff.
+        self.assertTrue(any("Confirmed creds" in l and "tomcat:[REDACTED]" in l
                             for l in leads), leads)
+        self.assertFalse(any("tomcat:tomcat" in l for l in leads), leads)
         self.assertTrue(any("phpMyAdmin" in l for l in leads))
 
 
@@ -1776,6 +1780,78 @@ class TestVhostWildcard(unittest.TestCase):
 
     def test_no_hits_returns_none(self):
         self.assertIsNone(EN._vhost_finding(80, []))
+
+
+class TestHandoffPTT(unittest.TestCase):
+    """The PTT handoff export must preserve Vantage's core guarantees: it reshapes
+    only (runs nothing), redacts secrets on the way out, ships the scope verdict,
+    and is deterministic (stable task ids)."""
+
+    def _fixture(self):
+        from vantage.modules import handoff as H
+        host = R.HostResult(
+            ip="10.10.10.104", hostname="box.htb", os_guess="Linux 4.x",
+            services=[R.Service(port=445, proto="tcp", name="netbios-ssn",
+                                product="Samba", version="3.0.20")],
+            nse_cves=["CVE-2007-2447"], nse_cve_scores={"CVE-2007-2447": 10.0})
+        enum = EN.EnumResult(findings=[
+            EN.EnumFinding(service_port=445, tool="enum4linux-ng",
+                           summary="null session allowed",
+                           detail="password = supersecret123",
+                           tags={"smb_share": "tmp", "confirmed_cred": "tomcat:tomcat"})])
+        exp = E.ExploitResult(candidates=[
+            E.ExploitCandidate(port=445, title="Samba usermap_script RCE",
+                               technique="CVE-2007-2447 command injection",
+                               msf_module="exploit/multi/samba/usermap_script",
+                               high_confidence=True, command="msfconsole -q ...",
+                               category="service",
+                               result="login: root password: hunter2")])
+        cfg = RunConfig(target="10.10.10.104", profile=Profile.gentle(),
+                        hostname="box.htb", klass="lab")
+        return H, cfg, host, enum, exp
+
+    def test_schema_and_tree_shape(self):
+        H, cfg, host, enum, exp = self._fixture()
+        ptt = H.build_ptt(cfg, host, enum, exp)
+        self.assertEqual(ptt["schema"], "vantage.ptt/v1")
+        svc = ptt["tree"]["services"][0]
+        self.assertEqual(svc["port"], 445)
+        self.assertEqual(len(svc["tasks"]), 1)
+        self.assertEqual(len(svc["evidence"]), 1)
+
+    def test_secrets_redacted_everywhere(self):
+        H, cfg, host, enum, exp = self._fixture()
+        blob = json.dumps(H.build_ptt(cfg, host, enum, exp,
+                                      analysis="api_key = AKIA1234567890ABCDEF"))
+        # nothing sensitive survives anywhere in the serialized handoff
+        for secret in ("supersecret123", "hunter2", "tomcat:tomcat", "AKIA1234567890ABCDEF"):
+            self.assertNotIn(secret, blob, secret)
+
+    def test_status_always_todo_and_provenance_only(self):
+        # report-only guarantee in the data: nothing is ever marked done, and
+        # source is provenance, never an outcome.
+        H, cfg, host, enum, exp = self._fixture()
+        task = H.build_ptt(cfg, host, enum, exp)["tree"]["services"][0]["tasks"][0]
+        self.assertEqual(task["status"], "todo")
+        self.assertTrue(task["source"].startswith("vantage:"))
+
+    def test_scope_verdict_travels(self):
+        H, cfg, host, enum, exp = self._fixture()
+        # no scope file configured -> in_scope is None, not silently True
+        auth = H.build_ptt(cfg, host, enum, exp)["authorization"]
+        self.assertIsNone(auth["in_scope"])
+        self.assertFalse(auth["scope_enforced"])
+        self.assertEqual(auth["classification"], "lab")
+
+    def test_task_ids_are_deterministic(self):
+        H, cfg, host, enum, exp = self._fixture()
+        id_a = H.build_ptt(cfg, host, enum, exp)["tree"]["services"][0]["tasks"][0]["id"]
+        id_b = H.build_ptt(cfg, host, enum, exp)["tree"]["services"][0]["tasks"][0]["id"]
+        self.assertEqual(id_a, id_b)
+
+    def test_ai_advisory_fenced_when_absent(self):
+        H, cfg, host, enum, exp = self._fixture()
+        self.assertNotIn("ai_advisory", H.build_ptt(cfg, host, enum, exp))
 
 
 if __name__ == "__main__":
