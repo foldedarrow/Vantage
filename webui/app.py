@@ -388,7 +388,7 @@ def _build_argv(form) -> tuple[list, str]:
     profile = form.get("profile", "auto")
     if profile == "stealth":
         argv.append("--stealth")
-    elif profile in ("lab", "gentle"):
+    elif profile in ("lab", "gentle", "external"):
         argv += ["--profile", profile]
 
     # The GUI can't answer the interactive prompt, so 'authorized' -> --yes. The

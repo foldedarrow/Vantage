@@ -115,6 +115,31 @@ class Profile:
         )
 
     @classmethod
+    def external(cls) -> "Profile":
+        """Fast-ish service identification over the internet for AUTHORIZED external
+        recon. External hosts firewall most ports (packets silently dropped), so a
+        full -p- + slow-timing scan waits out a timeout on every filtered port and
+        can run for hours. This profile keeps it bounded and practical: normal
+        timing, top-ports only, low version-intensity, and a per-host timeout so one
+        black-holing host can't pin the whole run at 100%. It drops the loud lab
+        extras (-O / -sC / NSE vuln / nikto / active web) that flood IDS/WAF and add
+        little against a hardened external box — opt back into them with --aggressive
+        if your authorization covers it. (vantage still exploits nothing.)"""
+        return cls(
+            name="external (fast service ID over the internet)",
+            nmap_timing="-T3",                                       # polite-but-usable
+            nmap_args="-sV --open --version-intensity 2 --host-timeout 20m",
+            http_threads=10,
+            udp_scan=False,        # UDP over the internet is slow + lossy
+            nse_vuln=False,        # --script vuln is loud and slow externally
+            parallelism=4,
+            enable_nikto=False,    # noisy; opt in via --aggressive
+            enable_dirbust=True,   # a bounded dir pass is reasonable
+            enable_active_web=False,  # no auto sqlmap/LFI against external targets
+            full_tcp=False,        # top-ports only -> skip the filtered-port timeout tax
+        )
+
+    @classmethod
     def stealth(cls) -> "Profile":
         """Low-and-slow, low-signature recon for AUTHORIZED testing of detection
         capabilities (does the SOC/IDS see it?). Drops the loud stuff: no -O / -sC

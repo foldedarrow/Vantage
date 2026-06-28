@@ -73,8 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("target", nargs="?", help="Target IP or hostname")
     p.add_argument("-o", "--out-dir", default="loot", help="Output directory (default: loot/)")
-    p.add_argument("--profile", choices=["auto", "lab", "gentle"], default="auto",
-                   help="auto = pick based on target IP (HTB->gentle, RFC1918->lab)")
+    p.add_argument("--profile", choices=["auto", "lab", "gentle", "external"], default="auto",
+                   help="auto = pick based on target IP (HTB->gentle, RFC1918->lab, "
+                        "public IP->external). 'external' = fast service ID over the "
+                        "internet (top-ports, -T3, per-host timeout); still needs "
+                        "--allow-external for a public target.")
     p.add_argument("--aggressive", action="store_true",
                    help="Enable the loudest, most thorough enumeration (full TCP, "
                         "nikto, NSE vuln scripts, active web crawl). Noisy. Lab only.")
@@ -321,15 +324,16 @@ def _is_own_vpn_ip(target: str) -> bool:
 
 def _prompt_external_profile(cfg: RunConfig) -> None:
     """Ask the operator whether an authorized external target should use the loud
-    'lab' profile (full aggressive automation) or stay on 'gentle'. Mutates
-    cfg.profile in place. Defaults to gentle on empty/EOF (the safe choice)."""
-    print(f"\n{C.YELLOW}This external target is on the GENTLE profile by default "
-          f"(quieter recon-led pass).{C.RESET}")
+    'lab' profile (full aggressive automation) or stay on the bounded 'external'
+    profile. Mutates cfg.profile in place. Defaults to external on empty/EOF (the
+    safe, fast choice)."""
+    print(f"\n{C.YELLOW}This external target is on the EXTERNAL profile by default "
+          f"(fast service ID: top-ports, -T3, per-host timeout).{C.RESET}")
     print("The LAB profile is full-intensity enumeration: -p- -T4, nikto, "
-          "dir-busting, NSE vuln scripts, and an active web crawl. It is LOUD and "
-          "can crash fragile services — only choose it if your written "
-          "authorization covers that level of intrusiveness. (vantage never "
-          "exploits anything on either profile.)")
+          "dir-busting, NSE vuln scripts, and an active web crawl. It is LOUD, far "
+          "slower over the internet, and can crash fragile services — only choose it "
+          "if your written authorization covers that level of intrusiveness. "
+          "(vantage never exploits anything on either profile.)")
     try:
         ans = input(f"{C.YELLOW}Use the full LAB (loud enumeration) profile for "
                     f"{cfg.target}? [y/N]: {C.RESET}")
@@ -339,7 +343,7 @@ def _prompt_external_profile(cfg: RunConfig) -> None:
         cfg.profile = Profile.lab()
         good(f"external target upgraded to LAB profile: {cfg.profile.name}")
     else:
-        info(f"keeping GENTLE profile: {cfg.profile.name}")
+        info(f"keeping EXTERNAL profile: {cfg.profile.name}")
 
 
 def authorization_gate(cfg: RunConfig, assume_yes: bool, allow_external: bool) -> bool:
@@ -474,12 +478,16 @@ def build_config(args) -> RunConfig:
         profile = Profile.gentle()
     elif args.profile == "lab":
         profile = Profile.lab()
+    elif args.profile == "external":
+        profile = Profile.external()
     else:  # auto
         if klass == "lab":
             profile = Profile.lab()
         elif klass == "external":
-            # placeholder; the gate will upgrade to lab if the operator confirms.
-            profile = Profile.gentle()
+            # external default: the bounded 'external' profile (not gentle, which
+            # full-scans every port and crawls against firewalled internet hosts).
+            # The gate still offers to upgrade to the loud lab profile.
+            profile = Profile.external()
         else:  # htb
             profile = Profile.gentle()
 
