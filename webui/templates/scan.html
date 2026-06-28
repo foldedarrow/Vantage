@@ -72,14 +72,17 @@
 <style>
   .report .f { display:block; margin:10px 0; }
   .report .f input, .report .f select { display:block; width:100%; margin-top:4px;
-    background:#0b0f14; border:1px solid var(--border); color:var(--fg);
-    border-radius:6px; padding:8px 10px; font-family:var(--mono); font-size:13px; }
-  .report fieldset { border:1px solid var(--border); border-radius:8px; margin:16px 0; padding:10px 14px; }
-  .report legend { color:var(--muted); padding:0 6px; }
+    background:#020609; border:1px solid var(--border); color:var(--fg);
+    border-radius:4px; padding:8px 10px; font-family:var(--mono); font-size:13px;
+    transition:border-color .15s, box-shadow .15s; }
+  .report .f input:focus, .report .f select:focus { outline:0; border-color:var(--accent);
+    box-shadow:0 0 0 1px var(--accent), 0 0 12px rgba(0,229,255,.25); }
+  .report .f input::placeholder { color:#3a525c; }
+  .report fieldset { border:1px solid var(--border); border-radius:4px; margin:16px 0; padding:10px 14px; }
+  .report legend { color:var(--accent); padding:0 8px; text-transform:uppercase;
+    letter-spacing:1.5px; font-size:11px; text-shadow:var(--glow); }
   .report .c { display:block; margin:7px 0; cursor:pointer; }
-  .report .c input { margin-right:8px; }
-  .btn { background:var(--green); color:#06250f; border:0; border-radius:8px;
-    padding:11px 20px; font-weight:700; font-size:14px; cursor:pointer; margin-top:8px; }
-  .btn:hover { filter:brightness(1.1); }
+  .report .c input { margin-right:8px; accent-color:var(--accent); }
+  .btn { margin-top:8px; }
 </style>
 {% endblock %}
