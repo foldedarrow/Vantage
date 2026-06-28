@@ -56,10 +56,9 @@ async function tick() {
       const bits = [pct + '% done'];
       if (p.remaining) bits.push('~' + p.remaining + ' remaining');
       if (p.phase) bits.push(p.phase);
-      html += '<div class="progress" style="margin-top:6px">'
-        + '<div style="background:#222;border-radius:4px;overflow:hidden;height:8px;max-width:320px">'
-        + '<div style="background:var(--accent,#4caf50);height:8px;width:' + pct + '%"></div></div>'
-        + '<span class="muted" style="font-size:12px">' + bits.join(' · ') + '</span></div>';
+      html += '<div class="progress">'
+        + '<div class="track"><div class="fill" style="width:' + pct + '%"></div></div>'
+        + '<span class="lbl">' + bits.join(' · ') + '</span></div>';
     }
     activity.innerHTML = html;
   } else {
