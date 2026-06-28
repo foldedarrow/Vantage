@@ -29,13 +29,39 @@ apt-get install -y "${APT_PKGS[@]}" || {
   echo "    Re-run 'vantage --check' to see what's still missing."
 }
 
-# pipx-installed tools not always in apt
+# pipx-installed tools not always in apt.
+#
+# IMPORTANT: install these GLOBALLY (--global → /usr/local/bin), not per-user.
+# vantage is normally run under sudo (nmap wants root), and sudo's secure_path
+# only includes /usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin. A plain per-user
+# `pipx install` lands in ~/.local/bin, which sudo never sees — so the tools
+# would show as missing in `vantage --check` even though they're installed.
+PIPX_PKGS=(droopescan arjun bloodhound certipy-ad git-dumper)
+
+if ! command -v pipx >/dev/null 2>&1; then
+  echo "[*] pipx not found — installing via apt"
+  apt-get install -y pipx || true
+fi
+
 if command -v pipx >/dev/null 2>&1; then
-  echo "[*] installing pipx tools (droopescan, arjun)"
-  pipx install droopescan || true
-  pipx install arjun || true
+  echo "[*] ensuring global pipx path"
+  pipx ensurepath --global >/dev/null 2>&1 || true
+  echo "[*] installing pipx tools globally (${PIPX_PKGS[*]})"
+  for pkg in "${PIPX_PKGS[@]}"; do
+    pipx install --global "$pkg" || echo "[!] pipx install --global $pkg failed (continuing)"
+  done
 else
-  echo "[!] pipx not found — skip droopescan/arjun, or: apt install pipx"
+  echo "[!] pipx still unavailable — skipping ${PIPX_PKGS[*]}"
+fi
+
+# kerbrute: no apt/pipx package. Drop the release binary in /usr/local/bin so it
+# lands on sudo's secure_path (go install would put it in ~/go/bin, invisible to sudo).
+echo "[*] installing kerbrute (release binary -> /usr/local/bin)"
+if curl -fsSL -o /usr/local/bin/kerbrute \
+     https://github.com/ropnop/kerbrute/releases/latest/download/kerbrute_linux_amd64; then
+  chmod +x /usr/local/bin/kerbrute
+else
+  echo "[!] kerbrute download failed — grab a release binary manually, or: go install github.com/ropnop/kerbrute@latest"
 fi
 
 # wpscan is a Ruby gem
@@ -44,4 +70,4 @@ if command -v gem >/dev/null 2>&1; then
   gem install wpscan || true
 fi
 
-echo "[+] done. Now run: python run.py --check"
+echo "[+] done. Now run: sudo python run.py --check"

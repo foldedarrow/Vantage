@@ -194,6 +194,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # --- doctor / dependency check ----------------------------------------------
+def _warn_sudo_path_shadow(missing: list[str]) -> None:
+    """Under sudo, ~/.local/bin and ~/go/bin (the invoking user's pipx/go installs)
+    are off secure_path, so they read as missing even when installed. If any
+    missing tool is actually sitting in one of those dirs, say so plainly."""
+    if os.geteuid() != 0 or not os.environ.get("SUDO_USER"):
+        return
+    home = os.path.expanduser(f"~{os.environ['SUDO_USER']}")
+    user_bins = [os.path.join(home, ".local", "bin"), os.path.join(home, "go", "bin")]
+    shadowed = []
+    for t in missing:
+        for b in user_bins:
+            cand = os.path.join(b, t)
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                shadowed.append((t, cand))
+                break
+    if not shadowed:
+        return
+    warn("running under sudo — these are installed per-user but invisible to "
+         "sudo's secure_path, so they read as missing:")
+    for t, cand in shadowed:
+        info(f"    {t}  ->  {cand}")
+    info("    fix: reinstall globally so they land in /usr/local/bin, e.g. "
+         "`sudo pipx install --global <pkg>` (see setup.sh), or run --check without sudo.")
+
+
 def run_doctor(args=None) -> int:
     banner(f"Vantage {__version__} — dependency check")
     tools = detect_tools()
@@ -212,6 +237,7 @@ def run_doctor(args=None) -> int:
         err("nmap is the one hard requirement and is missing — recon won't run.")
     if missing:
         warn(f"{len(missing)} tool(s) missing; their steps will be skipped.")
+        _warn_sudo_path_shadow(missing)
     else:
         good("all known tools present.")
 
