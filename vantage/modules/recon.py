@@ -255,8 +255,8 @@ def _rescan_connect(cfg: RunConfig, host: HostResult) -> HostResult | None:
     xml_out = os.path.join(cfg.out_dir, f"nmap_connect_{cfg.target.replace('/', '_')}.xml")
     cmd = ["nmap", "-sT", "-sV", "--version-intensity", "9",
            cfg.profile.nmap_timing, "-p", ports, "--open",
-           "-oX", xml_out, cfg.target]
-    rc, _, _ = run(cmd, timeout=900)
+           "--stats-every", "15s", "-oX", xml_out, cfg.target]
+    rc, _, _ = run(cmd, timeout=900, progress=True)
     if not os.path.exists(xml_out):
         return None
     return parse_nmap_xml(xml_out)
@@ -276,8 +276,9 @@ def _scan_extra_ports(cfg: RunConfig, host: HostResult) -> None:
     xml_out = os.path.join(cfg.out_dir, f"nmap_extra_{cfg.target.replace('/', '_')}.xml")
     scan_type = ["-sT"] if cfg.connect_scan else []
     cmd = ["nmap", cfg.profile.nmap_timing, *scan_type, "-Pn", "-sV",
-           "-p", ",".join(str(p) for p in extra), "--open", "-oX", xml_out, cfg.target]
-    rc, _, _ = run(cmd, timeout=600)
+           "-p", ",".join(str(p) for p in extra), "--open",
+           "--stats-every", "15s", "-oX", xml_out, cfg.target]
+    rc, _, _ = run(cmd, timeout=600, progress=True)
     if not os.path.exists(xml_out):
         return
     found = parse_nmap_xml(xml_out)
@@ -316,10 +317,11 @@ def scan(cfg: RunConfig) -> HostResult:
         *_discovery_perf_flags(cfg),
         *cfg.profile.nmap_args.split(),
         *port_spec,
+        "--stats-every", "15s",
         "-oX", xml_out,
         cfg.target,
     ]
-    rc, out, _ = run(cmd, timeout=1800)
+    rc, out, _ = run(cmd, timeout=1800, progress=True)
     if not os.path.exists(xml_out):
         warn("nmap did not produce an XML file; returning empty result.")
         return HostResult(ip=cfg.target)
@@ -384,8 +386,9 @@ def discover_hosts(cfg: RunConfig) -> list[str]:
         warn("nmap not found on PATH — cannot discover hosts.")
         return []
     xml_out = os.path.join(cfg.out_dir, f"nmap_discover_{cfg.target.replace('/', '_')}.xml")
-    cmd = ["nmap", "-sn", cfg.profile.nmap_timing, "-oX", xml_out, cfg.target]
-    run(cmd, timeout=1800)
+    cmd = ["nmap", "-sn", cfg.profile.nmap_timing,
+           "--stats-every", "15s", "-oX", xml_out, cfg.target]
+    run(cmd, timeout=1800, progress=True)
     if not os.path.exists(xml_out):
         return []
     return [h.ip for h in parse_nmap_xml_all(xml_out) if h.ip]
@@ -395,8 +398,8 @@ def _udp_scan(cfg: RunConfig) -> list[Service]:
     info("UDP top-50 scan (slow; SNMP/DNS/TFTP/etc.)")
     xml_out = os.path.join(cfg.out_dir, f"nmap_udp_{cfg.target.replace('/', '_')}.xml")
     cmd = ["nmap", "-sU", cfg.profile.nmap_timing, "--top-ports", "50",
-           "--open", "-oX", xml_out, cfg.target]
-    rc, _, _ = run(cmd, timeout=1200)
+           "--open", "--stats-every", "15s", "-oX", xml_out, cfg.target]
+    rc, _, _ = run(cmd, timeout=1200, progress=True)
     if not os.path.exists(xml_out):
         return []
     udp_host = parse_nmap_xml(xml_out)

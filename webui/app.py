@@ -192,14 +192,18 @@ def _scan_status(events: list[dict], age: float | None = None) -> dict:
     (age under the stale threshold). A Ctrl-C'd/killed run stops writing, so it
     goes stale and is reported as stopped — not live."""
     done = any(e.get("event") in ("run_done", "run_abort", "sweep_done") for e in events)
-    active, last_start, phase = 0, None, ""
+    active, last_start, phase, last_progress = 0, None, "", None
     for e in events:
         ev = e.get("event", "")
         if ev == "exec_start":
             active += 1
             last_start = e
+            last_progress = None        # new tool — reset any prior progress
+        elif ev == "exec_progress":
+            last_progress = e           # live nmap percentage for the running tool
         elif ev == "exec_end":
             active = max(0, active - 1)
+            last_progress = None
         elif ev.endswith("_done") or ev.endswith("_start"):
             phase = ev
     stale = age is not None and age > LIVE_STALE_SECONDS
@@ -209,6 +213,10 @@ def _scan_status(events: list[dict], age: float | None = None) -> dict:
     if running and last_start:
         current = {"tool": last_start.get("tool", ""), "cmd": last_start.get("cmd", ""),
                    "ts": last_start.get("ts", "")}
+        if last_progress:
+            current["progress"] = {"percent": last_progress.get("percent"),
+                                   "remaining": last_progress.get("remaining"),
+                                   "phase": last_progress.get("phase")}
     return {"live": live, "running": running, "done": done, "stale": stale,
             "current": current, "phase": phase, "n_events": len(events),
             "age": None if age is None else round(age)}

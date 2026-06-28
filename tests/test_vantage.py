@@ -1854,5 +1854,56 @@ class TestHandoffPTT(unittest.TestCase):
         self.assertNotIn("ai_advisory", H.build_ptt(cfg, host, enum, exp))
 
 
+class TestNmapProgress(unittest.TestCase):
+    """Live nmap progress: parse --stats-every lines into a percentage and stream
+    them, instead of the blind 'still running' heartbeat."""
+
+    def test_parses_percent_remaining_phase(self):
+        pr = U._parse_nmap_progress(
+            "SYN Stealth Scan Timing: About 47.13% done; ETC: 14:23 (0:00:34 remaining)")
+        self.assertEqual(pr["percent"], 47.13)
+        self.assertEqual(pr["remaining"], "0:00:34")
+        self.assertEqual(pr["phase"], "SYN Stealth Scan")
+
+    def test_parses_service_scan_phase(self):
+        pr = U._parse_nmap_progress(
+            "Service scan Timing: About 80.00% done; ETC: 14:25 (0:00:05 remaining)")
+        self.assertEqual(pr["phase"], "Service scan")
+        self.assertEqual(pr["percent"], 80.0)
+
+    def test_percent_without_remaining_still_parses(self):
+        pr = U._parse_nmap_progress("Ping Scan Timing: About 12.00% done")
+        self.assertEqual(pr["percent"], 12.0)
+        self.assertNotIn("remaining", pr)
+
+    def test_non_progress_lines_return_none(self):
+        for line in ("Nmap scan report for 10.10.10.104",
+                     "Stats: 0:00:30 elapsed; 0 hosts completed (1 up)",
+                     "Discovered open port 445/tcp on 10.10.10.104", ""):
+            self.assertIsNone(U._parse_nmap_progress(line), line)
+
+    def test_format_progress_human_readable(self):
+        s = U._format_progress("nmap", {"percent": 47.0, "remaining": "0:00:34",
+                                         "phase": "SYN Stealth Scan"})
+        self.assertIn("47% done", s)
+        self.assertIn("~0:00:34 remaining", s)
+        self.assertIn("SYN Stealth Scan", s)
+
+    def test_streaming_accumulates_output_and_streams_lines(self):
+        emit = ("print('SYN Stealth Scan Timing: About 50.00% done; "
+                "ETC: 14:23 (0:00:10 remaining)'); print('done')")
+        seen = []
+        rc, out, _ = U._run_streaming([sys.executable, "-c", emit], 10, seen.append)
+        self.assertEqual(rc, 0)
+        self.assertIn("done", out)                       # full output still captured
+        self.assertTrue(any(U._parse_nmap_progress(l) for l in seen))  # streamed live
+
+    def test_streaming_timeout_returns_124(self):
+        rc, _, errout = U._run_streaming(
+            [sys.executable, "-c", "import time; time.sleep(30)"], 1, lambda l: None)
+        self.assertEqual(rc, 124)
+        self.assertEqual(errout, "timeout")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
