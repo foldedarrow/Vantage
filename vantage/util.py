@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -149,6 +150,78 @@ def budget_exceeded() -> bool:
     return rem is not None and rem <= 0
 
 
+# nmap's runtime progress lines (emitted with --stats-every), e.g.
+#   "SYN Stealth Scan Timing: About 47.13% done; ETC: 14:23 (0:00:34 remaining)"
+# We surface the live percentage instead of a blind 'still running' heartbeat.
+_NMAP_PCT = re.compile(r"About\s+([\d.]+)%\s+done(?:.*?\(([\d:]+)\s+remaining\))?", re.I)
+_NMAP_PHASE = re.compile(r"^(.*?)\s+Timing:\s*About", re.I)
+
+
+def _parse_nmap_progress(line: str) -> dict | None:
+    """Parse a single nmap stats line into {percent, [remaining], [phase]}.
+    Returns None for any line that isn't a progress update."""
+    m = _NMAP_PCT.search(line)
+    if not m:
+        return None
+    out: dict = {"percent": float(m.group(1))}
+    if m.group(2):
+        out["remaining"] = m.group(2)
+    pm = _NMAP_PHASE.search(line.strip())
+    if pm and pm.group(1).strip():
+        out["phase"] = pm.group(1).strip()
+    return out
+
+
+def _format_progress(tool: str, pr: dict) -> str:
+    s = f"{tool}: {pr['percent']:.0f}% done"
+    if pr.get("remaining"):
+        s += f", ~{pr['remaining']} remaining"
+    if pr.get("phase"):
+        s += f" ({pr['phase']})"
+    return s
+
+
+def _run_streaming(cmd: list[str], timeout: int, on_line) -> tuple[int, str, str]:
+    """Run `cmd` with live output: each line of stdout/stderr is accumulated AND
+    passed to `on_line` as it arrives (so a parser can surface progress in real
+    time). Returns the same (rc, stdout, stderr) shape as a buffered run; rc=124
+    on timeout. Two reader threads avoid the classic pipe-buffer deadlock."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1)
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+
+    def _reader(stream, sink):
+        try:
+            for line in stream:
+                sink.append(line)
+                try:
+                    on_line(line.rstrip("\n"))
+                except Exception:  # noqa: BLE001 — a parser bug must not kill the scan
+                    pass
+        finally:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    t_out = threading.Thread(target=_reader, args=(proc.stdout, out_lines), daemon=True)
+    t_err = threading.Thread(target=_reader, args=(proc.stderr, err_lines), daemon=True)
+    t_out.start()
+    t_err.start()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        t_out.join(timeout=2)
+        t_err.join(timeout=2)
+        return 124, "".join(out_lines), "timeout"
+    t_out.join(timeout=2)
+    t_err.join(timeout=2)
+    return proc.returncode, "".join(out_lines), "".join(err_lines)
+
+
 class _Heartbeat:
     """Emit a 'still running (Ns)' line every `interval`s for a long call (#17)."""
     def __init__(self, label: str, interval: float = 30.0):
@@ -174,9 +247,16 @@ class _Heartbeat:
         self._stop.set()
 
 
-def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, str, str]:
+def run(cmd: list[str], timeout: int = 300, capture: bool = True,
+        progress: bool = False) -> tuple[int, str, str]:
     """Run a command. Returns (returncode, stdout, stderr).
     Never raises on non-zero exit; returns the captured output instead.
+
+    With `progress=True` the call is streamed instead of buffered: nmap stats
+    lines (emitted by --stats-every) are parsed live and surfaced as real
+    percentage updates + 'exec_progress' events, replacing the blind heartbeat.
+    Output is still fully accumulated and returned unchanged, so callers see no
+    difference. Requires `capture` (the default).
 
     Honours the global wall-clock budget (#17): the effective timeout is the
     smaller of the requested timeout and the remaining budget, and a call that's
@@ -192,9 +272,27 @@ def run(cmd: list[str], timeout: int = 300, capture: bool = True) -> tuple[int, 
     _log_event("exec_start", tool=cmd[0], cmd=" ".join(cmd))
     start = time.time()
     rc = None
-    # Heartbeat only for calls we expect could be long.
-    hb = _Heartbeat(cmd[0], interval=30.0) if timeout >= 60 else None
+    use_stream = progress and capture
+    # Heartbeat only for calls we expect could be long — and not when streaming,
+    # which surfaces real progress instead.
+    hb = None if use_stream else (_Heartbeat(cmd[0], interval=30.0) if timeout >= 60 else None)
     try:
+        if use_stream:
+            tool = cmd[0]
+
+            def _on_line(line: str):
+                pr = _parse_nmap_progress(line)
+                if pr:
+                    info(f"  {_format_progress(tool, pr)}")
+                    _log_event("exec_progress", tool=tool, **pr)
+
+            rc, out, errout = _run_streaming(cmd, timeout, _on_line)
+            dur = time.time() - start
+            if rc == 124:
+                warn(f"timed out after {timeout}s: {tool}")
+            elif dur > 1:
+                info(f"  -> finished in {dur:.1f}s (rc={rc})")
+            return rc, out, errout
         if hb:
             hb.__enter__()
         proc = subprocess.run(
